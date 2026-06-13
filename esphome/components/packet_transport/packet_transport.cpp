@@ -609,4 +609,43 @@ void PacketTransport::send_ping_pong_request_() {
   this->resend_ping_key_ = false;
   ESP_LOGV(TAG, "Sent new ping request %08X", (unsigned) this->ping_key_);
 }
+
+#if defined(USE_SENSOR) || defined(USE_BINARY_SENSOR)
+namespace {
+// Move a remote sensor/binary-sensor subscription to a different source provider at runtime.
+// The remote id (broadcast name) is preserved; only the source peer changes. Returns true if
+// the entity was found (whether it was moved or already sourced from new_provider).
+template<typename SensorPtr>
+bool move_remote_source(PacketTransport *parent, string_map_t<string_map_t<SensorPtr>> &remote_map, SensorPtr sensor,
+                        const std::string &new_provider) {
+  for (auto &provider : remote_map) {
+    for (auto it = provider.second.begin(); it != provider.second.end(); ++it) {
+      if (it->second != sensor)
+        continue;
+      if (provider.first == new_provider)
+        return true;  // already sourced from this provider
+      std::string remote_id = it->first;
+      provider.second.erase(it);
+      parent->add_provider(new_provider.c_str());  // ensure the provider (and its maps) exist
+      remote_map[new_provider][remote_id] = sensor;
+      ESP_LOGD(TAG, "Switched remote '%s' source to provider '%s'", remote_id.c_str(), new_provider.c_str());
+      return true;
+    }
+  }
+  ESP_LOGW(TAG, "set_provider: entity not currently registered with any provider");
+  return false;
+}
+}  // namespace
+#endif
+
+#ifdef USE_SENSOR
+bool PacketTransport::set_sensor_provider(sensor::Sensor *sensor, const std::string &provider) {
+  return move_remote_source(this, this->remote_sensors_, sensor, provider);
+}
+#endif
+#ifdef USE_BINARY_SENSOR
+bool PacketTransport::set_binary_sensor_provider(binary_sensor::BinarySensor *sensor, const std::string &provider) {
+  return move_remote_source(this, this->remote_binary_sensors_, sensor, provider);
+}
+#endif
 }  // namespace esphome::packet_transport

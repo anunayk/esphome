@@ -42,3 +42,21 @@ binary_sensor:
     name: Some-Device Status
   - platform: template
     id: binary_sensor_id1
+
+# Exercise the runtime provider-management actions.
+interval:
+  - interval: 60s
+    then:
+      - packet_transport.add_provider:
+          name: runtime-peer
+      - packet_transport.add_provider:
+          name: keyed-runtime-peer
+          encryption_key: !lambda 'return std::vector<uint8_t>(32, 0xAB);'
+      - packet_transport.remove_provider:
+          name: runtime-peer
+      - packet_transport.set_provider:
+          sensor: our_id
+          provider: keyed-runtime-peer
+      - packet_transport.set_provider:
+          binary_sensor: other_binary_sensor_id
+          provider: !lambda 'return "keyed-runtime-peer";'
