@@ -102,6 +102,28 @@ class PacketTransport : public PollingComponent {
     }
   }
 
+  /// Remove a provider and drop any remote sensor subscriptions registered against it.
+  void remove_provider(const std::string &name) {
+    this->providers_.erase(name);
+#ifdef USE_SENSOR
+    this->remote_sensors_.erase(name);
+#endif
+#ifdef USE_BINARY_SENSOR
+    this->remote_binary_sensors_.erase(name);
+#endif
+  }
+
+#ifdef USE_SENSOR
+  /// Re-point a remote sensor to a different source provider at runtime, preserving its remote id.
+  /// Returns false if the sensor is not currently registered with any provider.
+  bool set_sensor_provider(sensor::Sensor *sensor, const std::string &provider);
+#endif
+#ifdef USE_BINARY_SENSOR
+  /// Re-point a remote binary sensor to a different source provider at runtime, preserving its remote id.
+  /// Returns false if the binary sensor is not currently registered with any provider.
+  bool set_binary_sensor_provider(binary_sensor::BinarySensor *sensor, const std::string &provider);
+#endif
+
   void set_is_provider(bool is_provider) { this->is_provider_ = is_provider; }
   void set_encryption_key(std::vector<uint8_t> key) { this->encryption_key_ = std::move(key); }
   void set_rolling_code_enable(bool enable) { this->rolling_code_enable_ = enable; }

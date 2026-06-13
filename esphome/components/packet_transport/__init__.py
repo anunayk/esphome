@@ -3,18 +3,21 @@
 import hashlib
 import logging
 
+from esphome import automation
 import esphome.codegen as cg
 from esphome.components.api import CONF_ENCRYPTION
 from esphome.components.binary_sensor import BinarySensor
 from esphome.components.sensor import Sensor
 import esphome.config_validation as cv
 from esphome.const import (
+    CONF_BINARY_SENSOR,
     CONF_BINARY_SENSORS,
     CONF_ID,
     CONF_INTERNAL,
     CONF_KEY,
     CONF_NAME,
     CONF_PLATFORM,
+    CONF_SENSOR,
     CONF_SENSORS,
 )
 from esphome.core import CORE
@@ -26,11 +29,20 @@ AUTO_LOAD = ["xxtea"]
 packet_transport_ns = cg.esphome_ns.namespace("packet_transport")
 PacketTransport = packet_transport_ns.class_("PacketTransport", cg.PollingComponent)
 
+AddProviderAction = packet_transport_ns.class_("AddProviderAction", automation.Action)
+RemoveProviderAction = packet_transport_ns.class_(
+    "RemoveProviderAction", automation.Action
+)
+SetProviderAction = packet_transport_ns.class_("SetProviderAction", automation.Action)
+
+byte_vector = cg.std_vector.template(cg.uint8)
+
 IS_PLATFORM_COMPONENT = True
 
 DOMAIN = "packet_transport"
 CONF_BROADCAST = "broadcast"
 CONF_BROADCAST_ID = "broadcast_id"
+CONF_ENCRYPTION_KEY = "encryption_key"
 CONF_PROVIDER = "provider"
 CONF_PROVIDERS = "providers"
 CONF_REMOTE_ID = "remote_id"
@@ -208,3 +220,92 @@ async def new_packet_transport(config):
     cg.add(var.set_platform_name(config[CONF_PLATFORM]))
     providers = await register_packet_transport(var, config)
     return var, providers
+
+
+# ============================================ Actions ============================================
+
+
+def _validate_encryption_key(value):
+    value = cv.ensure_list(cv.hex_uint8_t)(value)
+    if len(value) != 32:
+        raise cv.Invalid(
+            f"Encryption key must be exactly 32 bytes (got {len(value)}). "
+            "Provide the already-derived key used by the peer."
+        )
+    return value
+
+
+ADD_PROVIDER_ACTION_SCHEMA = cv.Schema(
+    {
+        cv.GenerateID(): cv.use_id(PacketTransport),
+        cv.Required(CONF_NAME): cv.templatable(provider_name_validate),
+        cv.Optional(CONF_ENCRYPTION_KEY): cv.templatable(_validate_encryption_key),
+    }
+)
+
+
+@automation.register_action(
+    "packet_transport.add_provider", AddProviderAction, ADD_PROVIDER_ACTION_SCHEMA
+)
+async def add_provider_action_to_code(config, action_id, template_arg, args):
+    var = cg.new_Pvariable(action_id, template_arg)
+    await cg.register_parented(var, config[CONF_ID])
+    templ = await cg.templatable(config[CONF_NAME], args, cg.std_string)
+    cg.add(var.set_name(templ))
+    if CONF_ENCRYPTION_KEY in config:
+        key = await cg.templatable(
+            config[CONF_ENCRYPTION_KEY], args, byte_vector, byte_vector
+        )
+        cg.add(var.set_encryption_key(key))
+    return var
+
+
+REMOVE_PROVIDER_ACTION_SCHEMA = cv.Schema(
+    {
+        cv.GenerateID(): cv.use_id(PacketTransport),
+        cv.Required(CONF_NAME): cv.templatable(provider_name_validate),
+    }
+)
+
+
+@automation.register_action(
+    "packet_transport.remove_provider",
+    RemoveProviderAction,
+    REMOVE_PROVIDER_ACTION_SCHEMA,
+)
+async def remove_provider_action_to_code(config, action_id, template_arg, args):
+    var = cg.new_Pvariable(action_id, template_arg)
+    await cg.register_parented(var, config[CONF_ID])
+    templ = await cg.templatable(config[CONF_NAME], args, cg.std_string)
+    cg.add(var.set_name(templ))
+    return var
+
+
+SET_PROVIDER_ACTION_SCHEMA = cv.All(
+    cv.Schema(
+        {
+            cv.GenerateID(): cv.use_id(PacketTransport),
+            cv.Optional(CONF_SENSOR): cv.use_id(Sensor),
+            cv.Optional(CONF_BINARY_SENSOR): cv.use_id(BinarySensor),
+            cv.Required(CONF_PROVIDER): cv.templatable(provider_name_validate),
+        }
+    ),
+    cv.has_exactly_one_key(CONF_SENSOR, CONF_BINARY_SENSOR),
+)
+
+
+@automation.register_action(
+    "packet_transport.set_provider", SetProviderAction, SET_PROVIDER_ACTION_SCHEMA
+)
+async def set_provider_action_to_code(config, action_id, template_arg, args):
+    var = cg.new_Pvariable(action_id, template_arg)
+    await cg.register_parented(var, config[CONF_ID])
+    templ = await cg.templatable(config[CONF_PROVIDER], args, cg.std_string)
+    cg.add(var.set_provider(templ))
+    if CONF_SENSOR in config:
+        sens = await cg.get_variable(config[CONF_SENSOR])
+        cg.add(var.set_sensor(sens))
+    if CONF_BINARY_SENSOR in config:
+        sens = await cg.get_variable(config[CONF_BINARY_SENSOR])
+        cg.add(var.set_binary_sensor(sens))
+    return var
