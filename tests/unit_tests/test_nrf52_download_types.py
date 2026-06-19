@@ -39,6 +39,59 @@ def test_nrf52_download_types_prefers_mcumgr_artifacts(tmp_path: Path) -> None:
     ]
 
 
+def test_nrf52_download_types_offers_mcuboot_bootloader_updater(
+    tmp_path: Path,
+) -> None:
+    """XIAO BLE MCUBoot builds also offer the bootloader DFU updater package."""
+    zephyr_dir = tmp_path / "zephyr"
+    zephyr_dir.mkdir()
+    (zephyr_dir / "merged.hex").touch()
+    (zephyr_dir / "app_update.bin").touch()
+    (zephyr_dir / "xiao_ble_mcuboot_updater_dfu.zip").touch()
+
+    downloads = nrf52.get_download_types(_storage_json(tmp_path))
+
+    assert [download["file"] for download in downloads] == [
+        "zephyr/merged.hex",
+        "zephyr/app_update.bin",
+        "zephyr/xiao_ble_mcuboot_updater_dfu.zip",
+    ]
+    assert downloads[2] == {
+        "title": "MCUboot bootloader update package",
+        "description": "One-time MCUboot install through the stock "
+        "Adafruit bootloader via adafruit-nrfutil using USB CDC. "
+        "No SWD debugger needed.",
+        "file": "zephyr/xiao_ble_mcuboot_updater_dfu.zip",
+        "download": "mcuboot-updater-test-device.zip",
+    }
+
+
+def test_nrf52_download_types_offers_mcuboot_migrator(tmp_path: Path) -> None:
+    """XIAO BLE two-slot migrator builds also offer the migrator .img."""
+    zephyr_dir = tmp_path / "zephyr"
+    zephyr_dir.mkdir()
+    (zephyr_dir / "merged.hex").touch()
+    (zephyr_dir / "app_update.bin").touch()
+    (zephyr_dir / "xiao_ble_mcuboot_migrator.img").touch()
+
+    downloads = nrf52.get_download_types(_storage_json(tmp_path))
+
+    assert [download["file"] for download in downloads] == [
+        "zephyr/merged.hex",
+        "zephyr/app_update.bin",
+        "zephyr/xiao_ble_mcuboot_migrator.img",
+    ]
+    assert downloads[2] == {
+        "title": "MCUboot two-slot migrator (no SWD)",
+        "description": "One-time fw1 -> fw2 migration. Upload to the "
+        "single-slot usb_cdc_recovery bootloader via USB-CDC serial "
+        "recovery, then physically reset: it installs this two-slot "
+        "swap MCUboot in place. No SWD debugger needed.",
+        "file": "zephyr/xiao_ble_mcuboot_migrator.img",
+        "download": "mcuboot-migrator-test-device.img",
+    }
+
+
 def test_nrf52_download_types_keeps_adafruit_uf2_default(tmp_path: Path) -> None:
     """Adafruit bootloader builds keep their existing UF2 and DFU choices."""
     zephyr_dir = tmp_path / "zephyr"
