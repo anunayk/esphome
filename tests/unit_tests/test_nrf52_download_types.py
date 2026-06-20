@@ -14,7 +14,7 @@ def _storage_json(build_dir: Path) -> SimpleNamespace:
 
 
 def test_nrf52_download_types_prefers_mcumgr_artifacts(tmp_path: Path) -> None:
-    """MCUBoot builds include UF2 output but need HEX and mcumgr app downloads."""
+    """Builds with MCUboot include UF2 output but need HEX and mcumgr app downloads."""
     zephyr_dir = tmp_path / "zephyr"
     zephyr_dir.mkdir()
     (zephyr_dir / "zephyr.uf2").touch()
