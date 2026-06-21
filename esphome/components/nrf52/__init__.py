@@ -9,6 +9,7 @@ import subprocess
 from esphome import pins
 import esphome.codegen as cg
 from esphome.components.zephyr import (
+    Section,
     add_extra_build_file,
     add_extra_script,
     copy_files as zephyr_copy_files,
@@ -37,6 +38,7 @@ from esphome.const import (
     CONF_FRAMEWORK,
     CONF_ID,
     CONF_OTA,
+    CONF_PLATFORM,
     CONF_RESET_PIN,
     CONF_SAFE_MODE,
     CONF_TOOLCHAIN,
@@ -191,8 +193,10 @@ DeviceFirmwareUpdate = nrf52_ns.class_("DeviceFirmwareUpdate", cg.Component)
 
 CONF_DFU = "dfu"
 CONF_DCDC = "dcdc"
+CONF_MCUBOOT = "mcuboot"
 CONF_REG0 = "reg0"
 CONF_UICR_ERASE = "uicr_erase"
+CONF_USB_CDC_RECOVERY = "usb_cdc_recovery"
 
 VOLTAGE_LEVELS = [1.8, 2.1, 2.4, 2.7, 3.0, 3.3]
 
@@ -213,6 +217,46 @@ def _dfu_schema(value: bool | ConfigType) -> ConfigType:
     return _DFU_SCHEMA(value)
 
 
+def _validate_mcuboot(config: ConfigType) -> ConfigType:
+    if CONF_MCUBOOT not in config:
+        return config
+    if config[KEY_BOOTLOADER] != BOOTLOADER_MCUBOOT:
+        raise cv.Invalid("mcuboot: is only valid with bootloader: mcuboot")
+    if config[CONF_MCUBOOT][CONF_USB_CDC_RECOVERY] and config[CONF_BOARD] != "xiao_ble":
+        raise cv.Invalid("mcuboot.usb_cdc_recovery is only supported on xiao_ble")
+    return config
+
+
+def _mcuboot_usb_cdc_recovery_enabled(config: ConfigType) -> bool:
+    mcuboot_config = config.get(CONF_MCUBOOT, {})
+    return mcuboot_config.get(CONF_USB_CDC_RECOVERY, False)
+
+
+def _validate_usb_cdc_recovery_ota(config: ConfigType, full_config: ConfigType) -> None:
+    """Reject usb_cdc_recovery combined with a runtime zephyr_mcumgr OTA.
+
+    usb_cdc_recovery builds a single-application-slot MCUboot
+    (CONFIG_SINGLE_APPLICATION_SLOT=y) that only updates through its own
+    USB-CDC serial recovery mode. It has no secondary slot and never swaps, so
+    a zephyr_mcumgr OTA (e.g. over BLE) silently writes an image into a slot the
+    bootloader ignores: the upload "succeeds" but the device keeps booting the
+    old firmware. These two cannot coexist, so fail loudly instead.
+    """
+    if not _mcuboot_usb_cdc_recovery_enabled(config):
+        return
+    for ota_conf in full_config.get(CONF_OTA, []):
+        if ota_conf.get(CONF_PLATFORM) == "zephyr_mcumgr":
+            raise cv.Invalid(
+                "mcuboot.usb_cdc_recovery builds a single-slot MCUboot that has no "
+                "secondary slot and can only be updated through its USB-CDC serial "
+                "recovery mode. A 'zephyr_mcumgr' OTA (e.g. over BLE) would upload "
+                "an image the bootloader never swaps in, so the device keeps "
+                "booting the old firmware. Remove 'usb_cdc_recovery: true' to build "
+                "the two-slot swap bootloader that supports OTA, or drop the 'ota:' "
+                "block and update via USB-CDC serial recovery."
+            )
+
+
 CONFIG_SCHEMA = cv.All(
     _detect_bootloader,
     set_core_data,
@@ -223,6 +267,11 @@ CONFIG_SCHEMA = cv.All(
             ),
             cv.Optional(KEY_BOOTLOADER): cv.one_of(*BOOTLOADERS, lower=True),
             cv.Optional(CONF_DFU): _dfu_schema,
+            cv.Optional(CONF_MCUBOOT): cv.Schema(
+                {
+                    cv.Optional(CONF_USB_CDC_RECOVERY, default=False): cv.boolean,
+                }
+            ),
             cv.Optional(CONF_DCDC, default=True): cv.boolean,
             cv.Optional(CONF_REG0): cv.Schema(
                 {
@@ -253,6 +302,7 @@ CONFIG_SCHEMA = cv.All(
         }
     ),
     _resolve_toolchain,
+    _validate_mcuboot,
     set_framework,
 )
 
@@ -271,6 +321,7 @@ def _final_validate(config):
             "Selected generic Adafruit bootloader. The board might crash. Consider settings `bootloader:`"
         )
     full_config = fv.full_config.get()
+    _validate_usb_cdc_recovery_ota(config, full_config)
     conf = config[CONF_FRAMEWORK]
     advanced = conf[CONF_ADVANCED]
 
@@ -334,14 +385,74 @@ async def to_code(config: ConfigType) -> None:
 
     if config[KEY_BOOTLOADER] == BOOTLOADER_MCUBOOT:
         cg.add_define("USE_BOOTLOADER_MCUBOOT")
+        # Build the app as an MCUboot image (signed, linked into the primary
+        # slot) and pull in the MCUboot child image + merged.hex. This must be
+        # set by the bootloader selection itself, not by the OTA component: a
+        # usb_cdc_recovery fw1 config has no zephyr_mcumgr OTA (the two are
+        # mutually exclusive), and without this the app would link as a plain
+        # SoftDevice app at 0x27000, MCUboot would never build, and the
+        # USB-CDC updater package could not be generated.
+        zephyr_add_prj_conf("BOOTLOADER_MCUBOOT", True)
         if config[CONF_BOARD] == "xiao_ble":
+            if _mcuboot_usb_cdc_recovery_enabled(config):
+                mcuboot_conf = "xiao_ble_mcuboot_usb_cdc_recovery.conf"
+                mcuboot_overlay = "xiao_ble_mcuboot_usb_cdc_recovery.overlay"
+                add_extra_script(
+                    "post",
+                    "xiao_ble_mcuboot_artifact.py",
+                    Path(__file__).parent / "xiao_ble_mcuboot_artifact.py.script",
+                )
+                # MCUboot must fit the executable region in the stock
+                # Adafruit bootloader flash map. 0xFD800..0xFDFFF is the
+                # Adafruit bootloader config page and 0xFE000..0xFEFFF is
+                # the MBR params page used during the bootloader swap; keep
+                # both free so a failed update cannot corrupt swap state.
+                #
+                # Reserve the nRF MBR at 0x0 (0x1000 bytes). The board reaches
+                # MCUboot (at 0xF4000) via this MBR + UICR.NRFFW[0]=0xF4000, so
+                # the application slot must NOT start at 0x0: if it does, the
+                # partition manager places mcuboot_primary over the MBR, MCUboot
+                # reads the MBR as a bogus primary image, and the first app
+                # upload overwrites the MBR -- bricking the boot path (no way
+                # back to MCUboot without SWD). With the MBR reserved here,
+                # mcuboot_primary auto-fills 0x1000..0x79000 (0x78000);
+                # mcuboot_secondary is sized to match (MCUboot requires equal
+                # primary/secondary slots), which shifts settings_storage to
+                # 0xF1000..0xF4000. The mcuboot / config / mbr-params / settings
+                # pages below are unchanged.
+                zephyr_add_pm_static(
+                    [
+                        Section("mbr", 0x0, 0x1000, "flash_primary"),
+                        Section("mcuboot_secondary", 0x79000, 0x78000, "flash_primary"),
+                        Section("settings_storage", 0xF1000, 0x3000, "flash_primary"),
+                        Section("mcuboot", 0xF4000, 0x9800, "flash_primary"),
+                        Section(
+                            "empty_adafruit_bl_config_page",
+                            0xFD800,
+                            0x800,
+                            "flash_primary",
+                        ),
+                        Section(
+                            "empty_mbr_params_page", 0xFE000, 0x1000, "flash_primary"
+                        ),
+                        Section(
+                            "empty_adafruit_bl_settings_page",
+                            0xFF000,
+                            0x1000,
+                            "flash_primary",
+                        ),
+                    ]
+                )
+            else:
+                mcuboot_conf = "xiao_ble_mcuboot.conf"
+                mcuboot_overlay = "xiao_ble_mcuboot.overlay"
             add_extra_build_file(
                 "zephyr/child_image/mcuboot.conf",
-                Path(__file__).parent / "xiao_ble_mcuboot.conf",
+                Path(__file__).parent / mcuboot_conf,
             )
             add_extra_build_file(
                 "zephyr/child_image/mcuboot/boards/xiao_ble.overlay",
-                Path(__file__).parent / "xiao_ble_mcuboot.overlay",
+                Path(__file__).parent / mcuboot_overlay,
             )
     elif "_sd" in config[KEY_BOOTLOADER]:
         bootloader = config[KEY_BOOTLOADER].split("_")
@@ -440,6 +551,7 @@ def get_download_types(storage_json: StorageJSON) -> list[dict[str, str]]:
     HEX_PATH = "zephyr/zephyr.hex"
     HEX_MERGED_PATH = "zephyr/merged.hex"
     APP_IMAGE_PATH = "zephyr/app_update.bin"
+    MCUBOOT_UPDATER_DFU_PATH = "zephyr/xiao_ble_mcuboot_updater_dfu.zip"
     build_dir = Path(storage_json.firmware_bin_path).parent
     if (build_dir / APP_IMAGE_PATH).is_file():
         types = [
@@ -460,6 +572,17 @@ def get_download_types(storage_json: StorageJSON) -> list[dict[str, str]]:
                 "download": f"app-{storage_json.name}.img",
             },
         ]
+        if (build_dir / MCUBOOT_UPDATER_DFU_PATH).is_file():
+            types.append(
+                {
+                    "title": "MCUboot bootloader update package",
+                    "description": "One-time MCUboot install through the stock "
+                    "Adafruit bootloader via adafruit-nrfutil using USB CDC. "
+                    "No SWD debugger needed.",
+                    "file": MCUBOOT_UPDATER_DFU_PATH,
+                    "download": f"mcuboot-updater-{storage_json.name}.zip",
+                }
+            )
     elif (build_dir / UF2_PATH).is_file():
         types = [
             {
@@ -508,9 +631,14 @@ def upload_program(config: ConfigType, args, host: str) -> bool:
 
     mcumgr_device: str | None = None
 
+    # Read the bootloader from the validated config, not zephyr_data():
+    # the upload/logs fast path loads a cached config without running
+    # validators, so CORE.data[KEY_ZEPHYR] is not populated here.
+    bootloader = config[PLATFORM_NRF52][KEY_BOOTLOADER]
+
     if get_port_type(host) == PortType.SERIAL:
         check_permissions(host)
-        if zephyr_data()[KEY_BOOTLOADER] == BOOTLOADER_MCUBOOT:
+        if bootloader == BOOTLOADER_MCUBOOT:
             mcumgr_device = host
         else:
             if not CORE.using_toolchain_platformio:
