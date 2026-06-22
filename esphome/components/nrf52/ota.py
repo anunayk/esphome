@@ -7,10 +7,15 @@ from pathlib import Path
 from bleak import BleakScanner
 from bleak.exc import BleakDeviceNotFoundError
 from smp.exceptions import SMPBadStartDelimiter
+from smp.image_management import IMG_MGMT_ERR
 from smpclient import SMPClient
 from smpclient.generics import error, success
 from smpclient.mcuboot import IMAGE_TLV, ImageInfo, MCUBootImageError, TLVNotFound
-from smpclient.requests.image_management import ImageStatesRead, ImageStatesWrite
+from smpclient.requests.image_management import (
+    ImageErase,
+    ImageStatesRead,
+    ImageStatesWrite,
+)
 from smpclient.requests.os_management import ResetWrite
 from smpclient.transport import SMPTransportDisconnected
 from smpclient.transport.ble import (
@@ -27,6 +32,7 @@ from esphome.upload_targets import PortType, get_port_type
 SMP_SERVICE_UUID = "8D53DC1D-1DB7-4CD3-868B-8A527460AA84"
 BLE_SCAN_TIMEOUT = 10.0  # seconds
 RESET_DELAY = 2.0  # seconds to wait before reset, allows on_end action to execute
+ERASE_TIMEOUT = 30.0  # seconds; flash-erasing the secondary slot can take a while
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -40,6 +46,14 @@ def _json_state(o: object) -> object:
     if hasattr(o, "__dict__"):
         return vars(o)
     return str(o)
+
+
+def _is_no_free_slot(response: object) -> bool:
+    """True if an SMP image-management error response is NO_FREE_SLOT."""
+    # SMP v2 image-management errors carry an `err` whose `rc` is an
+    # IMG_MGMT_ERR; for other groups the enum differs so the comparison is False.
+    err = getattr(response, "err", None)
+    return err is not None and getattr(err, "rc", None) == IMG_MGMT_ERR.NO_FREE_SLOT
 
 
 async def smpmgr_scan(name: str) -> str:
@@ -141,6 +155,7 @@ async def _smpmgr_upload_connected(
         raise EsphomeError(f"mcumgr is not supported by device ({device})") from exc
 
     already_uploaded = False
+    stale_slot: int | None = None
 
     if error(image_state):
         raise EsphomeError(f"Failed to read image state from {device}: {image_state}")
@@ -161,6 +176,39 @@ async def _smpmgr_upload_connected(
                     raise EsphomeError("The same image already confirmed")
                 _LOGGER.warning("The same image already uploaded")
                 already_uploaded = True
+            elif image.pending and not image.active:
+                # A leftover image from a previous OTA is sitting in the
+                # secondary slot marked "pending" (queued for the next swap but
+                # never booted/confirmed). MCUboot reserves that slot for the
+                # pending swap and refuses a new upload with NO_FREE_SLOT, so it
+                # must be erased before a different image can be written.
+                stale_slot = image.slot
+
+    if stale_slot is not None and not already_uploaded:
+        _LOGGER.info(
+            "Erasing stale pending image in slot %d to free the secondary slot",
+            stale_slot,
+        )
+        r = await smp_client.request(ImageErase(slot=stale_slot), ERASE_TIMEOUT)
+        if error(r) and _is_no_free_slot(r):
+            # The running firmware was built without
+            # CONFIG_MCUMGR_GRP_IMG_ALLOW_ERASE_PENDING, so mcumgr refuses to
+            # erase the pending slot and would also refuse the upload below with
+            # the same NO_FREE_SLOT error. There is no remote way out of this:
+            # the pending swap must be cleared via serial recovery.
+            raise EsphomeError(
+                f"Slot {stale_slot} on {device} holds a pending image from a "
+                "previous OTA that this firmware will not let mcumgr erase, so a "
+                "new image cannot be uploaded over BLE. Recover by resetting the "
+                "board into USB CDC MCUboot serial recovery and re-uploading over "
+                "serial; the resulting firmware allows erasing a pending slot, so "
+                "later BLE OTAs will work."
+            )
+        if error(r):
+            # Other errors (e.g. single-slot MCUboot reporting ENOTSUP) are not
+            # fatal -- let the upload below surface a genuine error if the slot
+            # really is not free.
+            _LOGGER.warning("Image erase of slot %d reported: %s", stale_slot, r)
 
     if not already_uploaded:
         with firmware.open("rb") as file:
