@@ -166,37 +166,25 @@ def test_locate_blob_ignores_nonblank_magic() -> None:
 # --- build_migrator_image -------------------------------------------------
 
 
-def test_build_migrator_image_requires_prebuilt(tmp_path: Path) -> None:
-    script = _load_migrator_script()
-    # Point PREBUILT_BASE at a missing file so the test is independent of whether
-    # a developer has built the real base locally (it is gitignored, not absent).
-    namespace = script["build_migrator_image"].__globals__
-    namespace["PREBUILT_BASE"] = tmp_path / "missing_base.bin"
-    assert not namespace["PREBUILT_BASE"].is_file()
-    with pytest.raises(script["MigratorError"], match="prebuilt migrator base"):
-        script["build_migrator_image"](tmp_path / "merged.hex", tmp_path / "out.img")
-
-
 def test_build_migrator_image_injects_and_packages(tmp_path: Path) -> None:
     script = _load_migrator_script()
-    base_path = tmp_path / "base.bin"
-    base_path.write_bytes(_fake_base(script))
+    # The base is built from source in the PlatformIO env (west build); here we
+    # pass a stand-in base directly so inject + package are exercised without NCS.
+    base_bytes = _fake_base(script)
     merged = tmp_path / "merged.hex"
     fw2 = bytes((i * 7) & 0xFF for i in range(2048))
     script["write_intel_hex"](merged, {0x1000 + i: b for i, b in enumerate(fw2)})
 
     output = tmp_path / "migrator.img"
 
-    # Patch module globals (no NCS / imgtool in CI): use the fake base and a
-    # signing stub that just copies the patched bytes through. runpy returns a
-    # copy of the namespace, so patch the functions' shared __globals__.
+    # Patch the signing stub (no imgtool in CI): copy the patched bytes through.
+    # runpy returns a copy of the namespace, so patch the function's __globals__.
     namespace = script["build_migrator_image"].__globals__
-    namespace["PREBUILT_BASE"] = base_path
     namespace["_imgtool_sign"] = lambda unsigned, out: out.write_bytes(
         unsigned.read_bytes()
     )
 
-    size = script["build_migrator_image"](merged, output)
+    size = script["build_migrator_image"](merged, output, base_bytes)
     assert size == output.stat().st_size
     assert size <= script["FW1_APP_SLOT_SIZE"]
 
@@ -266,6 +254,14 @@ def test_migrator_registers_child_images_and_pm_static(setup_core: Path) -> None
         extra_build_files["zephyr/child_image/mcuboot/boards/xiao_ble.overlay"].name
         == "xiao_ble_mcuboot_migrator.overlay"
     )
+    # The standalone migrator Zephyr app is copied into the build so the
+    # post-build step can compile the base from source (no committed binary).
+    assert "migrator/CMakeLists.txt" in extra_build_files
+    assert "migrator/prj.conf" in extra_build_files
+    assert "migrator/src/main.c" in extra_build_files
+    assert "migrator/migrator_layout.h" in extra_build_files
+    # The README is docs only and must not be shipped into the build.
+    assert "migrator/README.md" not in extra_build_files
     assert (
         "post:xiao_ble_mcuboot_migrator.py" in CORE.platformio_options["extra_scripts"]
     )
