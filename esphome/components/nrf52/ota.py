@@ -6,6 +6,7 @@ from pathlib import Path
 
 from bleak import BleakScanner
 from bleak.exc import BleakDeviceNotFoundError
+from smp.error import MGMT_ERR
 from smp.exceptions import SMPBadStartDelimiter
 from smpclient import SMPClient
 from smpclient.generics import error, success
@@ -114,7 +115,12 @@ async def _smpmgr_upload_connected(
     try:
         image_state = await smp_client.request(ImageStatesRead(), 2.5)
     except (SMPBadStartDelimiter, TimeoutError) as exc:
-        raise EsphomeError(f"mcumgr is not supported by device ({device})") from exc
+        raise EsphomeError(
+            f"mcumgr is not responding on {device}. If this board still runs "
+            "the stock Adafruit bootloader, install MCUboot first. If MCUboot "
+            "is already installed, reset the board into USB CDC recovery mode "
+            "and retry after the serial port appears."
+        ) from exc
 
     already_uploaded = False
 
@@ -154,11 +160,36 @@ async def _smpmgr_upload_connected(
     r = await smp_client.request(ImageStatesWrite(hash=image_tlv_sha256), 1.0)
 
     if error(r):
-        raise EsphomeError(f"Failed to mark image for testing on {device}: {r}")
+        # Single-application-slot MCUboot (e.g. the nrf52 usb_cdc_recovery
+        # bootloader) has no test/confirm/swap state, so the "set image state"
+        # command is unsupported. The image is already written to the sole slot
+        # and boots directly on reset, so ENOTSUP here is expected, not fatal.
+        if getattr(r, "rc", None) == MGMT_ERR.ENOTSUP:
+            _LOGGER.info(
+                "Device does not support image set-state (single-slot MCUboot); "
+                "the uploaded image will boot on reset"
+            )
+        else:
+            raise EsphomeError(f"Failed to mark image for testing on {device}: {r}")
 
     await asyncio.sleep(RESET_DELAY)
     _LOGGER.info("Reset")
-    r = await smp_client.request(ResetWrite(), 1.0)
+    try:
+        r = await smp_client.request(ResetWrite(), 1.0)
+    except TimeoutError:
+        # The device may reset before it can reply; that is still a success.
+        r = None
 
-    if error(r):
+    # Single-slot MCUboot serial recovery answers reset with an error-typed
+    # frame carrying rc=EOK (and may not actually reboot until a physical reset);
+    # treat EOK/ENOTSUP as success so a completed upload is not reported failed.
+    if (
+        r is not None
+        and error(r)
+        and getattr(r, "rc", None)
+        not in (
+            MGMT_ERR.EOK,
+            MGMT_ERR.ENOTSUP,
+        )
+    ):
         raise EsphomeError(f"Failed to reset {device}: {r}")
