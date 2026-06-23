@@ -2,11 +2,13 @@
 
 Runs as a PlatformIO post action on the two-slot relocated fw2 build. It:
 
-  1. extracts the relocated fw2 MCUboot bytes from this build's merged.hex
+  1. compiles the standalone migrator Zephyr app from source (`west build`) to
+     produce the unsigned base image -- so no binary is committed in-tree,
+  2. extracts the relocated fw2 MCUboot bytes from this build's merged.hex
      (the `mcuboot` partition at 0x1000),
-  2. injects them into the prebuilt migrator base binary by overwriting the
+  3. injects them into the freshly built base by overwriting the
      `struct mig_blob` placeholder (located by its 16-byte magic),
-  3. signs the result for fw1's single application slot with imgtool, producing
+  4. signs the result for fw1's single application slot with imgtool, producing
      `xiao_ble_mcuboot_migrator.img`.
 
 The pure functions (read_intel_hex, extract_fw2_bootloader, inject_blob) are
@@ -19,10 +21,12 @@ this script can never drift -- see BOOTLOADER_UPDATER_PLAN.md.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 import re
 import struct
 import subprocess
+import sys
 import tempfile
 import zlib
 
@@ -46,27 +50,21 @@ except Exception:  # noqa: BLE001 -- NameError under runpy; be defensive otherwi
     _PIO_ENV = None
 
 
-def _resolve_resource_paths() -> tuple[Path, Path]:
-    """Return (layout_header, prebuilt_base) for the current execution context.
+def _resolve_migrator_src_dir() -> Path:
+    """Return the standalone migrator Zephyr app source dir for this context.
 
-    Under PlatformIO the nrf52 ``to_code`` copies both resources into the
-    build's project dir alongside this script (see nrf52/__init__.py); under
-    runpy/pytest they live in the component source tree next to this file.
+    Under PlatformIO the nrf52 ``to_code`` copies the whole app tree into the
+    build's project dir under ``migrator/`` (see nrf52/__init__.py), where the
+    post-build step compiles it; under runpy/pytest it lives in the component
+    source tree next to this file.
     """
     if _PIO_ENV is not None:
-        project_dir = Path(_PIO_ENV.subst("$PROJECT_DIR"))
-        return (
-            project_dir / "migrator_layout.h",
-            project_dir / "xiao_ble_mcuboot_migrator_base.bin",
-        )
-    migrator_dir = Path(__file__).resolve().parent / "migrator"
-    return (
-        migrator_dir / "migrator_layout.h",
-        migrator_dir / "prebuilt" / "xiao_ble_mcuboot_migrator_base.bin",
-    )
+        return Path(_PIO_ENV.subst("$PROJECT_DIR")) / "migrator"
+    return Path(__file__).resolve().parent / "migrator"
 
 
-LAYOUT_HEADER, PREBUILT_BASE = _resolve_resource_paths()
+MIGRATOR_SRC_DIR = _resolve_migrator_src_dir()
+LAYOUT_HEADER = MIGRATOR_SRC_DIR / "migrator_layout.h"
 
 # fw1's single application slot (xiao_ble_mcuboot_usb_cdc_recovery layout). The
 # migrator image is uploaded here via fw1 serial recovery, so it must fit.
@@ -283,8 +281,8 @@ def locate_blob(base_bin: bytes) -> int:
     if not candidates:
         raise MigratorError(
             "migrator base binary has no mig_blob placeholder (magic + a blank "
-            f"0x{BLOB_CAPACITY:X}-byte capacity region) -- is it the right "
-            "prebuilt (unsigned zephyr.bin)?"
+            f"0x{BLOB_CAPACITY:X}-byte capacity region) -- is it the unsigned "
+            "zephyr.bin from the migrator app build?"
         )
     if len(candidates) > 1:
         raise MigratorError(
@@ -371,16 +369,74 @@ def _imgtool_sign(unsigned: Path, output: Path) -> None:
         raise MigratorError(f"imgtool sign failed: {err.stderr}") from err
 
 
-def build_migrator_image(merged_hex: Path, output_path: Path) -> int:
-    """Extract, inject, and sign. Returns the final image size in bytes."""
-    if not PREBUILT_BASE.is_file():
+def _build_base(env) -> bytes:
+    """Compile the standalone migrator Zephyr app and return its unsigned base.
+
+    Runs ``west build -b xiao_ble`` against the framework-zephyr NCS workspace
+    and the gnuarmemb toolchain that the nrf52 platform already provides, and
+    returns ``build/zephyr/zephyr.bin`` -- the unsigned, MCUboot-headered image
+    whose ``mig_blob`` placeholder this script then patches. Built fresh on every
+    run so the base always matches the committed migrator source; nothing is
+    committed in-tree.
+    """
+    platform = env.PioPlatform()
+    zephyr_pkg = Path(platform.get_package_dir("framework-zephyr"))
+    toolchain_pkg = Path(platform.get_package_dir("toolchain-gccarmnoneeabi"))
+    if not zephyr_pkg.is_dir():
         raise MigratorError(
-            f"prebuilt migrator base not found at {PREBUILT_BASE}; build it per "
-            "migrator/README.md"
+            "framework-zephyr package not found; cannot build the migrator base"
         )
+    build_dir = Path(env.subst("$BUILD_DIR")) / "migrator_base"
+    build_env = dict(os.environ)
+    build_env["ZEPHYR_BASE"] = str(zephyr_pkg / "zephyr")
+    build_env["ZEPHYR_TOOLCHAIN_VARIANT"] = "gnuarmemb"
+    build_env["GNUARMEMB_TOOLCHAIN_PATH"] = str(toolchain_pkg)
+    # `west` runs from within the NCS workspace; --pristine always keeps the
+    # base reproducible regardless of any stale build artifacts.
+    cmd = [
+        sys.executable,
+        "-m",
+        "west",
+        "build",
+        "--pristine",
+        "always",
+        "-b",
+        "xiao_ble",
+        "-d",
+        str(build_dir),
+        str(MIGRATOR_SRC_DIR),
+    ]
+    try:
+        subprocess.run(
+            cmd,
+            check=True,
+            cwd=str(zephyr_pkg),
+            env=build_env,
+            capture_output=True,
+            text=True,
+        )
+    except FileNotFoundError as err:
+        raise MigratorError(
+            "could not run `west` to build the migrator base; ensure west is "
+            "available in the build environment (python -m west)"
+        ) from err
+    except subprocess.CalledProcessError as err:
+        raise MigratorError(
+            f"west build of the migrator base failed:\n{err.stderr}"
+        ) from err
+    base = build_dir / "zephyr" / "zephyr.bin"
+    if not base.is_file():
+        raise MigratorError(f"migrator base not produced at {base}")
+    return base.read_bytes()
+
+
+def build_migrator_image(
+    merged_hex: Path, output_path: Path, base_bin: bytes
+) -> int:
+    """Extract, inject, and sign. Returns the final image size in bytes."""
     data = read_intel_hex(merged_hex)
     fw2_bytes = extract_fw2_bootloader(data)
-    patched = inject_blob(PREBUILT_BASE.read_bytes(), fw2_bytes)
+    patched = inject_blob(base_bin, fw2_bytes)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory() as work_dir:
         unsigned = Path(work_dir) / "migrator_patched.bin"
@@ -398,19 +454,17 @@ def build_migrator_image(merged_hex: Path, output_path: Path) -> int:
 def _platformio_generate_artifact(source, target, env) -> None:
     build_dir = Path(env.subst("$BUILD_DIR"))
     zephyr_dir = build_dir / "zephyr"
-    if not PREBUILT_BASE.is_file():
-        print(
-            f"[nrf52 migrator] prebuilt base missing ({PREBUILT_BASE}); "
-            "skipping migrator image (see migrator/README.md)"
-        )
-        return
     partitions = build_dir / "partitions.yml"
     if partitions.is_file():
         _validate_partitions(partitions)
     for input_name in ("merged.hex", "zephyr.hex"):
         input_path = zephyr_dir / input_name
         if input_path.is_file():
-            size = build_migrator_image(input_path, zephyr_dir / OUTPUT_NAME)
+            print("[nrf52 migrator] building migrator base from source...")
+            base_bin = _build_base(env)
+            size = build_migrator_image(
+                input_path, zephyr_dir / OUTPUT_NAME, base_bin
+            )
             print(f"[nrf52 migrator] wrote {OUTPUT_NAME} ({size} bytes)")
             return
     raise MigratorError(

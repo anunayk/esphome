@@ -485,20 +485,21 @@ async def to_code(config: ConfigType) -> None:
                 )
                 # The post-build script runs in a separate PlatformIO/SCons
                 # process with no access to the component source tree, so copy
-                # the resources it needs into the build's project dir: the
-                # shared layout header (parsed for the MIG_* addresses) and, if
-                # it has been built, the prebuilt migrator base binary.
+                # the whole standalone migrator Zephyr app into the build's
+                # project dir under migrator/. The post-build step compiles it
+                # from source (west build) to produce the unsigned base image,
+                # then injects this build's relocated fw2 bootloader blob and
+                # signs it -- so no prebuilt binary is committed in-tree. See
+                # migrator/README.md.
                 migrator_dir = Path(__file__).parent / "migrator"
-                add_extra_build_file(
-                    "migrator_layout.h", migrator_dir / "migrator_layout.h"
-                )
-                migrator_base = (
-                    migrator_dir / "prebuilt" / "xiao_ble_mcuboot_migrator_base.bin"
-                )
-                if migrator_base.is_file():
-                    add_extra_build_file(
-                        "xiao_ble_mcuboot_migrator_base.bin", migrator_base
-                    )
+                for src in sorted(migrator_dir.rglob("*")):
+                    if not src.is_file():
+                        continue
+                    rel = src.relative_to(migrator_dir)
+                    # README is docs only; nothing else is excluded.
+                    if rel.parts[0] == "README.md":
+                        continue
+                    add_extra_build_file(f"migrator/{rel.as_posix()}", src)
                 # The Nordic Partition Manager requires the static layout to
                 # leave exactly one gap (for the dynamic mcuboot_primary/app at
                 # 0xD000..0x80000). The reserved top region above settings holds

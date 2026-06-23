@@ -10,15 +10,13 @@ MBR at `0x0` is kept, fw2's MCUboot is relocated to `0x1000`, and the boot path
 is committed by retargeting `UICR.NRFFW[0]` as the very last step — so fw1 stays
 a live fallback until that single commit.
 
-> **Layout hardware-validated (2026-06-19); on-device migrator still pending.**
-> The flash addresses and target UICR values in `migrator_layout.h` are
-> hardware-validated on a XIAO nRF52840: the fw2 build's `partitions.yml`
-> matches them exactly, and the full Option B end-state (factory MBR at `0x0` +
+> **Hardware-validated on a XIAO nRF52840.** The flash addresses and target
+> UICR values in `migrator_layout.h` match the fw2 build's `partitions.yml`
+> exactly, and the full Option B end-state (factory MBR at `0x0` +
 > `NRFFW[0]=0x1000` + `NRFFW[1]=0xFE000` + `NFCPINS=0xFFFFFFFE`) was reproduced
-> over SWD and **boots the app**. What is *not* yet validated is running the
-> `src/migrate.c` routine itself on-device (it needs the prebuilt base, below).
-> That routine is intrinsically brick-capable, so keep the SWD rig attached for
-> its first real run.
+> over SWD and **boots the app**; the `src/migrate.c` routine has been run
+> end-to-end on-device. That routine is intrinsically brick-capable, so keep an
+> SWD rig attached as a recovery net for its first run on any new board.
 
 ## How it works
 
@@ -45,26 +43,27 @@ compiled `.bin` and overwrites the header + payload with the relocated fw2
 MCUboot extracted from that build's `merged.hex`. The C app and the injector
 share the constants in `migrator_layout.h`.
 
-## Building the prebuilt base (offline, once)
+## Building the base (automatic, from source)
 
-The ESPHome build does **not** compile this app; it patches a committed prebuilt
-base binary. The base must be the **unsigned** `zephyr.bin` — patching the blob
-changes the image bytes, so signing has to happen *after* injection. Regenerate
-the base with NCS (matching the framework version the nrf52 component pins) when
-`src/` changes:
+The ESPHome build compiles this app **from source** during a migrator firmware
+compile — no binary is committed in-tree. When `nrf52: mcuboot: migrator: true`
+is set, `to_code` copies this whole app tree into the build's project dir and
+the post-build script (`../xiao_ble_mcuboot_migrator.py.script`) runs:
 
 ```sh
-west build -b xiao_ble -d build esphome/components/nrf52/migrator \
-  -- -DEXTRA_CONF_FILE=prj.conf
-
-# UNSIGNED image (MCUboot header padded, not yet signed):
-cp build/zephyr/zephyr.bin \
-   esphome/components/nrf52/migrator/prebuilt/xiao_ble_mcuboot_migrator_base.bin
+west build -b xiao_ble -d <build>/migrator_base \
+  esphome/components/nrf52/migrator
 ```
 
-The injector (`../xiao_ble_mcuboot_migrator.py.script`) reads
-`prebuilt/xiao_ble_mcuboot_migrator_base.bin`, overwrites the blob, then runs
+against the `framework-zephyr` NCS workspace and the `gnuarmemb` toolchain the
+nrf52 platform already provides (`ZEPHYR_BASE` / `GNUARMEMB_TOOLCHAIN_PATH` are
+set from the resolved PlatformIO package dirs). The resulting **unsigned**
+`build/zephyr/zephyr.bin` is the base: patching the blob changes the image
+bytes, so signing happens *after* injection. The script then overwrites the
+`mig_blob` placeholder with this build's relocated fw2 MCUboot and runs
 `imgtool sign` (signature type *none*, fw1's single-slot size) to produce
-`xiao_ble_mcuboot_migrator.img`. If the prebuilt is absent, the ESPHome
-post-build step logs a warning and skips the migrator artifact (the rest of the
-build is unaffected).
+`xiao_ble_mcuboot_migrator.img`. Because the base is rebuilt on every compile,
+it always matches `src/` — there is nothing to regenerate by hand.
+
+To build the base standalone (e.g. to inspect it), run the same `west build`
+command above with `ZEPHYR_BASE` pointed at your NCS checkout.
