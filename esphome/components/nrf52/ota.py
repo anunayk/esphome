@@ -232,13 +232,15 @@ async def _smpmgr_upload_connected(
     r = await smp_client.request(ImageStatesWrite(hash=image_tlv_sha256), 1.0)
 
     if error(r):
-        # Single-application-slot MCUboot (e.g. the nrf52 usb_cdc_recovery
-        # bootloader) has no test/confirm/swap state, so the "set image state"
-        # command is unsupported. The image is already written to the sole slot
-        # and boots directly on reset, so ENOTSUP here is expected, not fatal.
+        # MCUboot serial recovery does not implement "set image state"
+        # (test/confirm/swap) and returns ENOTSUP -- this is true for BOTH the
+        # single-slot usb_cdc_recovery (fw1) bootloader AND the two-slot fw2
+        # bootloader's recovery mode, so it is NOT a fw1-vs-fw2 indicator. The
+        # image is already written to the primary slot and boots directly on
+        # reset, so ENOTSUP here is expected, not fatal.
         if getattr(r, "rc", None) == MGMT_ERR.ENOTSUP:
             _LOGGER.info(
-                "Device does not support image set-state (single-slot MCUboot); "
+                "Set-image-state not supported in MCUboot serial recovery; "
                 "the uploaded image will boot on reset"
             )
         else:

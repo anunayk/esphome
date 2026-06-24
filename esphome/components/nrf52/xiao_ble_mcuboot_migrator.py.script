@@ -386,11 +386,26 @@ def _build_base(env) -> bytes:
         raise MigratorError(
             "framework-zephyr package not found; cannot build the migrator base"
         )
+    # The nrf52 platform pins `toolchain-gccarmnoneeabi` to the Zephyr SDK
+    # (sdk-ng), not a gnuarmemb GCC. Use the SDK the same way the platform's
+    # framework-zephyr/scripts/platformio/platformio-build.py does: point
+    # `Zephyr-sdk_DIR` at it and put arm-zephyr-eabi/bin on PATH (do NOT force
+    # ZEPHYR_TOOLCHAIN_VARIANT=gnuarmemb -- that looks for an arm-none-eabi-gcc
+    # the SDK package does not contain).
+    sdk_roots = sorted(toolchain_pkg.glob("zephyr-sdk-*"))
+    if not sdk_roots:
+        raise MigratorError(
+            f"Zephyr SDK not found under {toolchain_pkg}; cannot build the "
+            "migrator base"
+        )
+    sdk_root = sdk_roots[-1]
     build_dir = Path(env.subst("$BUILD_DIR")) / "migrator_base"
     build_env = dict(os.environ)
     build_env["ZEPHYR_BASE"] = str(zephyr_pkg / "zephyr")
-    build_env["ZEPHYR_TOOLCHAIN_VARIANT"] = "gnuarmemb"
-    build_env["GNUARMEMB_TOOLCHAIN_PATH"] = str(toolchain_pkg)
+    build_env["Zephyr-sdk_DIR"] = str(sdk_root / "cmake")
+    build_env["PATH"] = os.pathsep.join(
+        [str(sdk_root / "arm-zephyr-eabi" / "bin"), build_env.get("PATH", "")]
+    )
     # `west` runs from within the NCS workspace; --pristine always keeps the
     # base reproducible regardless of any stale build artifacts.
     cmd = [
