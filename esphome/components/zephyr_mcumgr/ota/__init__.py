@@ -100,6 +100,13 @@ async def to_code(config: ConfigType) -> None:
 
     zephyr_add_prj_conf("MCUMGR_GRP_IMG", True)
 
+    # Allow erasing/overwriting the secondary slot even when it already holds an
+    # image that was marked for test (pending) by a previous OTA but never
+    # booted. Without this, mcumgr's img_mgmt_slot_in_use() treats the pending
+    # slot as occupied and refuses both the new upload and an explicit erase
+    # with IMG_MGMT_ERR_NO_FREE_SLOT, deadlocking OTA until a manual recovery.
+    zephyr_add_prj_conf("MCUMGR_GRP_IMG_ALLOW_ERASE_PENDING", True)
+
     zephyr_add_prj_conf("IMG_MANAGER", True)
     zephyr_add_prj_conf("STREAM_FLASH", True)
     zephyr_add_prj_conf("FLASH_MAP", True)
