@@ -1,0 +1,73 @@
+/*
+ * fw2 MCUboot (Option B migrator path) board overlay -- mcuboot child image.
+ * Mirrors the validated fw1 USB-CDC recovery overlay
+ * (xiao_ble_mcuboot_usb_cdc_recovery.overlay): MCUboot's serial recovery uses
+ * the CDC ACM UART so the empty-primary fw2 can receive the real app over USB.
+ */
+
+/ {
+	chosen {
+		zephyr,cdc-acm-uart = &cdc_acm_uart0;
+		zephyr,uart-mcumgr = &cdc_acm_uart0;
+	};
+
+	leds {
+		status = "disabled";
+	};
+
+	pwmleds {
+		status = "disabled";
+	};
+};
+
+&zephyr_udc0 {
+	status = "okay";
+};
+
+&usb_cdc_acm_uart {
+	status = "disabled";
+};
+
+&adc {
+	status = "disabled";
+};
+
+&gpiote {
+	status = "disabled";
+};
+
+&gpio0 {
+	status = "disabled";
+};
+
+&gpio1 {
+	status = "disabled";
+};
+
+&i2c1 {
+	status = "disabled";
+};
+
+&ieee802154 {
+	status = "disabled";
+};
+
+&pwm0 {
+	status = "disabled";
+};
+
+&qspi {
+	status = "disabled";
+};
+
+&p25q16h {
+	status = "disabled";
+};
+
+&spi2 {
+	status = "disabled";
+};
+
+&uart0 {
+	status = "disabled";
+};

@@ -197,6 +197,7 @@ CONF_MCUBOOT = "mcuboot"
 CONF_REG0 = "reg0"
 CONF_UICR_ERASE = "uicr_erase"
 CONF_USB_CDC_RECOVERY = "usb_cdc_recovery"
+CONF_MIGRATOR = "migrator"
 
 VOLTAGE_LEVELS = [1.8, 2.1, 2.4, 2.7, 3.0, 3.3]
 
@@ -224,12 +225,31 @@ def _validate_mcuboot(config: ConfigType) -> ConfigType:
         raise cv.Invalid("mcuboot: is only valid with bootloader: mcuboot")
     if config[CONF_MCUBOOT][CONF_USB_CDC_RECOVERY] and config[CONF_BOARD] != "xiao_ble":
         raise cv.Invalid("mcuboot.usb_cdc_recovery is only supported on xiao_ble")
+    if config[CONF_MCUBOOT][CONF_MIGRATOR] and config[CONF_BOARD] != "xiao_ble":
+        raise cv.Invalid("mcuboot.migrator is only supported on xiao_ble")
+    if (
+        config[CONF_MCUBOOT][CONF_MIGRATOR]
+        and config[CONF_MCUBOOT][CONF_USB_CDC_RECOVERY]
+    ):
+        # usb_cdc_recovery is the single-slot fw1 bootloader; migrator builds the
+        # relocated two-slot fw2 that fw1 is migrated *to*. They are different
+        # flash layouts and cannot be built into one image.
+        raise cv.Invalid(
+            "mcuboot.migrator and mcuboot.usb_cdc_recovery are mutually "
+            "exclusive: usb_cdc_recovery builds the single-slot fw1 bootloader, "
+            "migrator builds the relocated two-slot fw2 that fw1 migrates to."
+        )
     return config
 
 
 def _mcuboot_usb_cdc_recovery_enabled(config: ConfigType) -> bool:
     mcuboot_config = config.get(CONF_MCUBOOT, {})
     return mcuboot_config.get(CONF_USB_CDC_RECOVERY, False)
+
+
+def _mcuboot_migrator_enabled(config: ConfigType) -> bool:
+    mcuboot_config = config.get(CONF_MCUBOOT, {})
+    return mcuboot_config.get(CONF_MIGRATOR, False)
 
 
 def _validate_usb_cdc_recovery_ota(config: ConfigType, full_config: ConfigType) -> None:
@@ -270,6 +290,7 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(CONF_MCUBOOT): cv.Schema(
                 {
                     cv.Optional(CONF_USB_CDC_RECOVERY, default=False): cv.boolean,
+                    cv.Optional(CONF_MIGRATOR, default=False): cv.boolean,
                 }
             ),
             cv.Optional(CONF_DCDC, default=True): cv.boolean,
@@ -443,6 +464,56 @@ async def to_code(config: ConfigType) -> None:
                         ),
                     ]
                 )
+            elif _mcuboot_migrator_enabled(config):
+                # Option B fw2: the relocated two-slot swap MCUboot that fw1 is
+                # migrated to over USB (no SWD). The factory nRF MBR stays at
+                # 0x0; MCUboot is relocated to 0x1000 and reached via
+                # UICR.NRFFW[0]=0x1000, which the migrator app commits at
+                # migration time. mcuboot_primary auto-fills the gap
+                # 0xD000..0x80000 between the relocated bootloader and the
+                # equal-sized secondary slot. The migrator post-build script
+                # extracts this relocated bootloader and embeds it into the
+                # migrator image. See BOOTLOADER_UPDATER_PLAN.md (Option B) and
+                # migrator/migrator_layout.h (the shared source of truth for
+                # these addresses).
+                mcuboot_conf = "xiao_ble_mcuboot_migrator.conf"
+                mcuboot_overlay = "xiao_ble_mcuboot_migrator.overlay"
+                add_extra_script(
+                    "post",
+                    "xiao_ble_mcuboot_migrator.py",
+                    Path(__file__).parent / "xiao_ble_mcuboot_migrator.py.script",
+                )
+                # The post-build script runs in a separate PlatformIO/SCons
+                # process with no access to the component source tree, so copy
+                # the resources it needs into the build's project dir: the
+                # shared layout header (parsed for the MIG_* addresses) and, if
+                # it has been built, the prebuilt migrator base binary.
+                migrator_dir = Path(__file__).parent / "migrator"
+                add_extra_build_file(
+                    "migrator_layout.h", migrator_dir / "migrator_layout.h"
+                )
+                migrator_base = (
+                    migrator_dir / "prebuilt" / "xiao_ble_mcuboot_migrator_base.bin"
+                )
+                if migrator_base.is_file():
+                    add_extra_build_file(
+                        "xiao_ble_mcuboot_migrator_base.bin", migrator_base
+                    )
+                # The Nordic Partition Manager requires the static layout to
+                # leave exactly one gap (for the dynamic mcuboot_primary/app at
+                # 0xD000..0x80000). The reserved top region above settings holds
+                # the factory MBR-params page (UICR.NRFFW[1]=0xFE000) and the
+                # Adafruit bootloader pages, which Option B preserves -- it must
+                # be declared statically too, or the PM sees two gaps and fails.
+                zephyr_add_pm_static(
+                    [
+                        Section("mbr", 0x0, 0x1000, "flash_primary"),
+                        Section("mcuboot", 0x1000, 0xC000, "flash_primary"),
+                        Section("mcuboot_secondary", 0x80000, 0x73000, "flash_primary"),
+                        Section("settings_storage", 0xF3000, 0xA800, "flash_primary"),
+                        Section("mbr_params", 0xFD800, 0x2800, "flash_primary"),
+                    ]
+                )
             else:
                 mcuboot_conf = "xiao_ble_mcuboot.conf"
                 mcuboot_overlay = "xiao_ble_mcuboot.overlay"
@@ -552,6 +623,7 @@ def get_download_types(storage_json: StorageJSON) -> list[dict[str, str]]:
     HEX_MERGED_PATH = "zephyr/merged.hex"
     APP_IMAGE_PATH = "zephyr/app_update.bin"
     MCUBOOT_UPDATER_DFU_PATH = "zephyr/xiao_ble_mcuboot_updater_dfu.zip"
+    MCUBOOT_MIGRATOR_PATH = "zephyr/xiao_ble_mcuboot_migrator.img"
     build_dir = Path(storage_json.firmware_bin_path).parent
     if (build_dir / APP_IMAGE_PATH).is_file():
         types = [
@@ -581,6 +653,18 @@ def get_download_types(storage_json: StorageJSON) -> list[dict[str, str]]:
                     "No SWD debugger needed.",
                     "file": MCUBOOT_UPDATER_DFU_PATH,
                     "download": f"mcuboot-updater-{storage_json.name}.zip",
+                }
+            )
+        if (build_dir / MCUBOOT_MIGRATOR_PATH).is_file():
+            types.append(
+                {
+                    "title": "MCUboot two-slot migrator (no SWD)",
+                    "description": "One-time fw1 -> fw2 migration. Upload to the "
+                    "single-slot usb_cdc_recovery bootloader via USB-CDC serial "
+                    "recovery, then physically reset: it installs this two-slot "
+                    "swap MCUboot in place. No SWD debugger needed.",
+                    "file": MCUBOOT_MIGRATOR_PATH,
+                    "download": f"mcuboot-migrator-{storage_json.name}.img",
                 }
             )
     elif (build_dir / UF2_PATH).is_file():
