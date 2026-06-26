@@ -138,6 +138,16 @@ def zephyr_to_code(config: ConfigType) -> None:
     # <err> os:   Illegal load of EXC_RETURN into PC
     zephyr_add_prj_conf("MAIN_STACK_SIZE", 2048, required=False)
 
+    # The Zephyr framework integration only adds lib_deps include dirs to the build,
+    # not their source files, so libraries with real sources (noise-c, libsodium,
+    # ...) compile but never link. This post-script compiles their sources into the
+    # Zephyr app. No-op when no used library has sources.
+    add_extra_script(
+        "post",
+        "compile_lib_sources.py",
+        Path(__file__).parent / "compile_lib_sources.py.script",
+    )
+
     CORE.add_job(_cdc_acm_to_code, config)
 
 
