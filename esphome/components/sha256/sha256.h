@@ -83,7 +83,7 @@ class SHA256 final : public esphome::HashBase {
   EVP_MD_CTX *ctx_{nullptr};
   bool calculated_{false};
 #elif defined(USE_SHA256_TINYCRYPT)
-  struct tc_sha256_state_struct ctx_{};
+  tc_sha256_state_struct ctx_{};
   bool calculated_{false};
 #else
 #error "SHA256 not supported on this platform"
