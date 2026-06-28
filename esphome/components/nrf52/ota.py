@@ -74,8 +74,11 @@ async def smpmgr_scan(name: str) -> str:
         # Match the live advertised name (local_name) as well as device.name.
         # On macOS, device.name is the cached GAP "Device Name" from a previous
         # connection, which goes stale after the firmware's name changes; the
-        # current name is in the advertisement's local_name.
-        if name not in (device.name, adv.local_name):
+        # current name is in the advertisement's local_name. `name` is the base
+        # esphome name; with name_add_mac_suffix the device advertises
+        # "<name>-<mac>", so accept that prefix too (an exact match would miss it).
+        adv_name = adv.local_name or device.name
+        if not (adv_name and (adv_name == name or adv_name.startswith(f"{name}-"))):
             continue
         # Prefer a device that actually advertises the OTA service (reliable on
         # backends like BlueZ that report scan-response UUIDs), but fall back to
