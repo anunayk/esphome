@@ -197,7 +197,8 @@ CONF_MCUBOOT = "mcuboot"
 CONF_REG0 = "reg0"
 CONF_UICR_ERASE = "uicr_erase"
 CONF_USB_CDC_RECOVERY = "usb_cdc_recovery"
-CONF_MIGRATOR = "migrator"
+CONF_TWO_SLOT = "two_slot"
+CONF_MIGRATOR_IMAGE = "migrator_image"
 
 VOLTAGE_LEVELS = [1.8, 2.1, 2.4, 2.7, 3.0, 3.3]
 
@@ -225,19 +226,31 @@ def _validate_mcuboot(config: ConfigType) -> ConfigType:
         raise cv.Invalid("mcuboot: is only valid with bootloader: mcuboot")
     if config[CONF_MCUBOOT][CONF_USB_CDC_RECOVERY] and config[CONF_BOARD] != "xiao_ble":
         raise cv.Invalid("mcuboot.usb_cdc_recovery is only supported on xiao_ble")
-    if config[CONF_MCUBOOT][CONF_MIGRATOR] and config[CONF_BOARD] != "xiao_ble":
-        raise cv.Invalid("mcuboot.migrator is only supported on xiao_ble")
+    if config[CONF_MCUBOOT][CONF_TWO_SLOT] and config[CONF_BOARD] != "xiao_ble":
+        raise cv.Invalid("mcuboot.two_slot is only supported on xiao_ble")
     if (
-        config[CONF_MCUBOOT][CONF_MIGRATOR]
+        config[CONF_MCUBOOT][CONF_TWO_SLOT]
         and config[CONF_MCUBOOT][CONF_USB_CDC_RECOVERY]
     ):
-        # usb_cdc_recovery is the single-slot fw1 bootloader; migrator builds the
+        # usb_cdc_recovery is the single-slot fw1 bootloader; two_slot builds the
         # relocated two-slot fw2 that fw1 is migrated *to*. They are different
         # flash layouts and cannot be built into one image.
         raise cv.Invalid(
-            "mcuboot.migrator and mcuboot.usb_cdc_recovery are mutually "
+            "mcuboot.two_slot and mcuboot.usb_cdc_recovery are mutually "
             "exclusive: usb_cdc_recovery builds the single-slot fw1 bootloader, "
-            "migrator builds the relocated two-slot fw2 that fw1 migrates to."
+            "two_slot builds the relocated two-slot fw2 that fw1 migrates to."
+        )
+    if (
+        config[CONF_MCUBOOT][CONF_MIGRATOR_IMAGE]
+        and not config[CONF_MCUBOOT][CONF_TWO_SLOT]
+    ):
+        # two_slot builds the app in the fw2 two-slot layout; migrator_image is
+        # the one-time fw1 -> fw2 installer that embeds *this build's* relocated
+        # fw2 bootloader, so it can only be produced from a two_slot build.
+        raise cv.Invalid(
+            "mcuboot.migrator_image requires mcuboot.two_slot: the installer "
+            "image embeds the relocated fw2 bootloader that the two_slot layout "
+            "produces."
         )
     return config
 
@@ -247,9 +260,9 @@ def _mcuboot_usb_cdc_recovery_enabled(config: ConfigType) -> bool:
     return mcuboot_config.get(CONF_USB_CDC_RECOVERY, False)
 
 
-def _mcuboot_migrator_enabled(config: ConfigType) -> bool:
+def _mcuboot_two_slot_enabled(config: ConfigType) -> bool:
     mcuboot_config = config.get(CONF_MCUBOOT, {})
-    return mcuboot_config.get(CONF_MIGRATOR, False)
+    return mcuboot_config.get(CONF_TWO_SLOT, False)
 
 
 def _validate_usb_cdc_recovery_ota(config: ConfigType, full_config: ConfigType) -> None:
@@ -290,7 +303,8 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(CONF_MCUBOOT): cv.Schema(
                 {
                     cv.Optional(CONF_USB_CDC_RECOVERY, default=False): cv.boolean,
-                    cv.Optional(CONF_MIGRATOR, default=False): cv.boolean,
+                    cv.Optional(CONF_TWO_SLOT, default=False): cv.boolean,
+                    cv.Optional(CONF_MIGRATOR_IMAGE, default=False): cv.boolean,
                 }
             ),
             cv.Optional(CONF_DCDC, default=True): cv.boolean,
@@ -464,42 +478,52 @@ async def to_code(config: ConfigType) -> None:
                         ),
                     ]
                 )
-            elif _mcuboot_migrator_enabled(config):
+            elif _mcuboot_two_slot_enabled(config):
                 # Option B fw2: the relocated two-slot swap MCUboot that fw1 is
-                # migrated to over USB (no SWD). The factory nRF MBR stays at
-                # 0x0; MCUboot is relocated to 0x1000 and reached via
+                # migrated to over USB (no SWD). This is the steady-state layout
+                # every normal build of the running app uses. The factory nRF MBR
+                # stays at 0x0; MCUboot is relocated to 0x1000 and reached via
                 # UICR.NRFFW[0]=0x1000, which the migrator app commits at
                 # migration time. mcuboot_primary auto-fills the gap
                 # 0xD000..0x80000 between the relocated bootloader and the
-                # equal-sized secondary slot. The migrator post-build script
-                # extracts this relocated bootloader and embeds it into the
-                # migrator image. See BOOTLOADER_UPDATER_PLAN.md (Option B) and
-                # migrator/migrator_layout.h (the shared source of truth for
-                # these addresses).
+                # equal-sized secondary slot. Producing the one-time fw1 -> fw2
+                # installer that embeds this relocated bootloader is a separate
+                # opt-in below (migrator_image). See BOOTLOADER_UPDATER_PLAN.md
+                # (Option B) and migrator/migrator_layout.h (the shared source of
+                # truth for these addresses).
                 mcuboot_conf = "xiao_ble_mcuboot_migrator.conf"
                 mcuboot_overlay = "xiao_ble_mcuboot_migrator.overlay"
-                add_extra_script(
-                    "post",
-                    "xiao_ble_mcuboot_migrator.py",
-                    Path(__file__).parent / "xiao_ble_mcuboot_migrator.py.script",
-                )
-                # The post-build script runs in a separate PlatformIO/SCons
-                # process with no access to the component source tree, so copy
-                # the whole standalone migrator Zephyr app into the build's
-                # project dir under migrator/. The post-build step compiles it
-                # from source (west build) to produce the unsigned base image,
-                # then injects this build's relocated fw2 bootloader blob and
-                # signs it -- so no prebuilt binary is committed in-tree. See
-                # migrator/README.md.
-                migrator_dir = Path(__file__).parent / "migrator"
-                for src in sorted(migrator_dir.rglob("*")):
-                    if not src.is_file():
-                        continue
-                    rel = src.relative_to(migrator_dir)
-                    # README is docs only; nothing else is excluded.
-                    if rel.parts[0] == "README.md":
-                        continue
-                    add_extra_build_file(f"migrator/{rel.as_posix()}", src)
+                if config[CONF_MCUBOOT][CONF_MIGRATOR_IMAGE]:
+                    # Producing the one-time fw1 -> fw2 installer image is a
+                    # separate, opt-in concern from building the app in the fw2
+                    # layout above. It compiles a standalone migrator Zephyr app
+                    # (its own west build) and is only needed once, to flash the
+                    # two-slot bootloader onto a board still running fw1; every
+                    # normal build/flash/OTA of the running app needs only the
+                    # fw2 layout. Gating it here keeps that orthogonal west build
+                    # out of the normal build path. See migrator/README.md.
+                    add_extra_script(
+                        "post",
+                        "xiao_ble_mcuboot_migrator.py",
+                        Path(__file__).parent / "xiao_ble_mcuboot_migrator.py.script",
+                    )
+                    # The post-build script runs in a separate PlatformIO/SCons
+                    # process with no access to the component source tree, so
+                    # copy the whole standalone migrator Zephyr app into the
+                    # build's project dir under migrator/. The post-build step
+                    # compiles it from source (west build) to produce the
+                    # unsigned base image, then injects this build's relocated
+                    # fw2 bootloader blob and signs it -- so no prebuilt binary
+                    # is committed in-tree.
+                    migrator_dir = Path(__file__).parent / "migrator"
+                    for src in sorted(migrator_dir.rglob("*")):
+                        if not src.is_file():
+                            continue
+                        rel = src.relative_to(migrator_dir)
+                        # README is docs only; nothing else is excluded.
+                        if rel.parts[0] == "README.md":
+                            continue
+                        add_extra_build_file(f"migrator/{rel.as_posix()}", src)
                 # The Nordic Partition Manager requires the static layout to
                 # leave exactly one gap (for the dynamic mcuboot_primary/app at
                 # 0xD000..0x80000). The reserved top region above settings holds

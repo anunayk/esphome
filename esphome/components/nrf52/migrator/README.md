@@ -45,8 +45,14 @@ share the constants in `migrator_layout.h`.
 
 ## Building the base (automatic, from source)
 
-The ESPHome build compiles this app **from source** during a migrator firmware
-compile — no binary is committed in-tree. When `nrf52: mcuboot: migrator: true`
+The ESPHome build compiles this app **from source** during a firmware compile —
+no binary is committed in-tree. Building the installer is opt-in and separate
+from building the app in the fw2 two-slot layout: `nrf52: mcuboot: two_slot:
+true` selects the relocated fw2 partition layout for the running app, while
+`nrf52: mcuboot: migrator_image: true` (which requires `two_slot: true`)
+additionally produces this one-time installer. Every normal build/flash/OTA of
+the app needs only `two_slot: true`; the installer is needed once, to flash the
+two-slot bootloader onto a board still running fw1. When `migrator_image: true`
 is set, `to_code` copies this whole app tree into the build's project dir and
 the post-build script (`../xiao_ble_mcuboot_migrator.py.script`) runs:
 

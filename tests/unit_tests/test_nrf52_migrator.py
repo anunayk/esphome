@@ -232,13 +232,13 @@ def test_validate_partitions_rejects_wrong_bootloader_address(tmp_path: Path) ->
 # --- config wiring --------------------------------------------------------
 
 
-def test_migrator_registers_child_images_and_pm_static(setup_core: Path) -> None:
+def test_two_slot_registers_child_images_and_pm_static(setup_core: Path) -> None:
     _setup_core(setup_core)
     config = nrf52.CONFIG_SCHEMA(
         {
             "board": "xiao_ble",
             "bootloader": "mcuboot",
-            "mcuboot": {"migrator": True},
+            "mcuboot": {"two_slot": True},
         }
     )
 
@@ -254,16 +254,14 @@ def test_migrator_registers_child_images_and_pm_static(setup_core: Path) -> None
         extra_build_files["zephyr/child_image/mcuboot/boards/xiao_ble.overlay"].name
         == "xiao_ble_mcuboot_migrator.overlay"
     )
-    # The standalone migrator Zephyr app is copied into the build so the
-    # post-build step can compile the base from source (no committed binary).
-    assert "migrator/CMakeLists.txt" in extra_build_files
-    assert "migrator/prj.conf" in extra_build_files
-    assert "migrator/src/main.c" in extra_build_files
-    assert "migrator/migrator_layout.h" in extra_build_files
-    # The README is docs only and must not be shipped into the build.
-    assert "migrator/README.md" not in extra_build_files
+    # The fw2 layout alone does NOT build the one-time migrator installer: the
+    # standalone migrator app is not copied into the build and the post-build
+    # packaging script is not registered (that is gated behind migrator_image).
+    assert "migrator/CMakeLists.txt" not in extra_build_files
+    assert "migrator/prj.conf" not in extra_build_files
     assert (
-        "post:xiao_ble_mcuboot_migrator.py" in CORE.platformio_options["extra_scripts"]
+        "post:xiao_ble_mcuboot_migrator.py"
+        not in CORE.platformio_options.get("extra_scripts", [])
     )
     assert [
         (section.name, section.address, section.size)
@@ -277,25 +275,64 @@ def test_migrator_registers_child_images_and_pm_static(setup_core: Path) -> None
     ]
 
 
-def test_migrator_rejects_usb_cdc_recovery_combo(setup_core: Path) -> None:
+def test_migrator_image_registers_installer_packaging(setup_core: Path) -> None:
+    _setup_core(setup_core)
+    config = nrf52.CONFIG_SCHEMA(
+        {
+            "board": "xiao_ble",
+            "bootloader": "mcuboot",
+            "mcuboot": {"two_slot": True, "migrator_image": True},
+        }
+    )
+
+    asyncio.run(nrf52.to_code(config))
+    CORE.flush_tasks()
+
+    extra_build_files = zephyr_data()[KEY_EXTRA_BUILD_FILES]
+    # The standalone migrator Zephyr app is copied into the build so the
+    # post-build step can compile the base from source (no committed binary).
+    assert "migrator/CMakeLists.txt" in extra_build_files
+    assert "migrator/prj.conf" in extra_build_files
+    assert "migrator/src/main.c" in extra_build_files
+    assert "migrator/migrator_layout.h" in extra_build_files
+    # The README is docs only and must not be shipped into the build.
+    assert "migrator/README.md" not in extra_build_files
+    assert (
+        "post:xiao_ble_mcuboot_migrator.py" in CORE.platformio_options["extra_scripts"]
+    )
+
+
+def test_migrator_image_requires_two_slot(setup_core: Path) -> None:
+    _setup_core(setup_core)
+    with pytest.raises(cv.Invalid, match="migrator_image requires mcuboot.two_slot"):
+        nrf52.CONFIG_SCHEMA(
+            {
+                "board": "xiao_ble",
+                "bootloader": "mcuboot",
+                "mcuboot": {"migrator_image": True},
+            }
+        )
+
+
+def test_two_slot_rejects_usb_cdc_recovery_combo(setup_core: Path) -> None:
     _setup_core(setup_core)
     with pytest.raises(cv.Invalid, match="mutually"):
         nrf52.CONFIG_SCHEMA(
             {
                 "board": "xiao_ble",
                 "bootloader": "mcuboot",
-                "mcuboot": {"migrator": True, "usb_cdc_recovery": True},
+                "mcuboot": {"two_slot": True, "usb_cdc_recovery": True},
             }
         )
 
 
-def test_migrator_rejects_unsupported_board(setup_core: Path) -> None:
+def test_two_slot_rejects_unsupported_board(setup_core: Path) -> None:
     _setup_core(setup_core)
     with pytest.raises(cv.Invalid, match="only supported on xiao_ble"):
         nrf52.CONFIG_SCHEMA(
             {
                 "board": "adafruit_feather_nrf52840",
                 "bootloader": "mcuboot",
-                "mcuboot": {"migrator": True},
+                "mcuboot": {"two_slot": True},
             }
         )
