@@ -7,8 +7,8 @@
 
 / {
 	chosen {
-		zephyr,cdc-acm-uart = &cdc_acm_uart0;
-		zephyr,uart-mcumgr = &cdc_acm_uart0;
+		zephyr,cdc-acm-uart = &usb_cdc_acm_uart;
+		zephyr,uart-mcumgr = &usb_cdc_acm_uart;
 	};
 
 	leds {
@@ -24,8 +24,14 @@
 	status = "okay";
 };
 
+/*
+ * NCS 2.9.2 renamed the xiao_ble USB-CDC node label cdc_acm_uart0 ->
+ * usb_cdc_acm_uart (xiao_ble_common.dtsi). The bootloader's serial recovery uses
+ * this CDC UART (chosen above), so leave the board's usb_cdc_acm_uart enabled
+ * rather than disabling it and pointing at a now-undefined cdc_acm_uart0.
+ */
 &usb_cdc_acm_uart {
-	status = "disabled";
+	status = "okay";
 };
 
 &adc {
