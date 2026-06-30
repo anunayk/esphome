@@ -407,7 +407,13 @@ def _build_base(env) -> bytes:
         [str(sdk_root / "arm-zephyr-eabi" / "bin"), build_env.get("PATH", "")]
     )
     # `west` runs from within the NCS workspace; --pristine always keeps the
-    # base reproducible regardless of any stale build artifacts.
+    # base reproducible regardless of any stale build artifacts. --sysbuild
+    # pins the multi-image system: NCS 2.9 already defaults to sysbuild, and
+    # forcing it keeps the output layout (_locate_base_bin) deterministic across
+    # NCS versions. The migrator needs no child bootloader of its own -- it is a
+    # plain app that this script imgtool-headers for fw1's slot -- so sysbuild
+    # builds only the `migrator` domain (the legacy migrator/child_image/ tree is
+    # inert under sysbuild and unused by the artifact).
     cmd = [
         sys.executable,
         "-m",
@@ -415,6 +421,7 @@ def _build_base(env) -> bytes:
         "build",
         "--pristine",
         "always",
+        "--sysbuild",
         "-b",
         "xiao_ble",
         "-d",
@@ -439,10 +446,41 @@ def _build_base(env) -> bytes:
         raise MigratorError(
             f"west build of the migrator base failed:\n{err.stderr}"
         ) from err
-    base = build_dir / "zephyr" / "zephyr.bin"
-    if not base.is_file():
-        raise MigratorError(f"migrator base not produced at {base}")
-    return base.read_bytes()
+    return _locate_base_bin(build_dir).read_bytes()
+
+
+def _locate_base_bin(build_dir: Path) -> Path:
+    """Return the unsigned migrator ``zephyr.bin`` from a west build dir.
+
+    A sysbuild ``west build`` (NCS 2.9 default, and forced in ``_build_base``)
+    puts the application image in a per-domain subdir
+    ``<build>/<domain>/zephyr/zephyr.bin`` rather than the legacy
+    ``<build>/zephyr/zephyr.bin``. Resolve the default domain from the
+    ``domains.yaml`` sysbuild emits, then fall back to the legacy
+    (non-sysbuild) path so this keeps working either way.
+    """
+    candidates: list[Path] = []
+    domains_file = build_dir / "domains.yaml"
+    if domains_file.is_file():
+        try:
+            domains = yaml.safe_load(domains_file.read_text(encoding="utf-8")) or {}
+        except yaml.YAMLError:
+            domains = {}
+        default = domains.get("default")
+        for entry in domains.get("domains", []):
+            if not isinstance(entry, dict):
+                continue
+            if default is None or entry.get("name") == default:
+                domain_dir = entry.get("build_dir")
+                if domain_dir:
+                    candidates.append(Path(domain_dir) / "zephyr" / "zephyr.bin")
+    # Legacy / non-sysbuild layout (and the pre-2.9 path).
+    candidates.append(build_dir / "zephyr" / "zephyr.bin")
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    searched = ", ".join(str(candidate) for candidate in candidates)
+    raise MigratorError(f"migrator base zephyr.bin not produced (searched: {searched})")
 
 
 def build_migrator_image(

@@ -197,6 +197,40 @@ def test_build_migrator_image_injects_and_packages(tmp_path: Path) -> None:
     assert target == 0x1000
 
 
+# --- _locate_base_bin (sysbuild output layout) ----------------------------
+
+
+def test_locate_base_bin_resolves_sysbuild_domain(tmp_path: Path) -> None:
+    """NCS 2.9 sysbuild puts the base in <build>/<domain>/zephyr/zephyr.bin."""
+    script = _load_migrator_script()
+    domain_bin = tmp_path / "migrator" / "zephyr" / "zephyr.bin"
+    domain_bin.parent.mkdir(parents=True)
+    domain_bin.write_bytes(b"\x01\x02")
+    (tmp_path / "domains.yaml").write_text(
+        "default: migrator\n"
+        "domains:\n"
+        "  - name: migrator\n"
+        f"    build_dir: {tmp_path / 'migrator'}\n",
+        encoding="utf-8",
+    )
+    assert script["_locate_base_bin"](tmp_path) == domain_bin
+
+
+def test_locate_base_bin_falls_back_to_legacy_layout(tmp_path: Path) -> None:
+    """Pre-2.9 / non-sysbuild builds keep the base at <build>/zephyr/zephyr.bin."""
+    script = _load_migrator_script()
+    legacy_bin = tmp_path / "zephyr" / "zephyr.bin"
+    legacy_bin.parent.mkdir(parents=True)
+    legacy_bin.write_bytes(b"\x03\x04")
+    assert script["_locate_base_bin"](tmp_path) == legacy_bin
+
+
+def test_locate_base_bin_raises_when_absent(tmp_path: Path) -> None:
+    script = _load_migrator_script()
+    with pytest.raises(script["MigratorError"], match="zephyr.bin not produced"):
+        script["_locate_base_bin"](tmp_path)
+
+
 # --- _validate_partitions -------------------------------------------------
 
 

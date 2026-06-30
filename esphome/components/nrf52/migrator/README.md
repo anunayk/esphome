@@ -57,14 +57,19 @@ is set, `to_code` copies this whole app tree into the build's project dir and
 the post-build script (`../xiao_ble_mcuboot_migrator.py.script`) runs:
 
 ```sh
-west build -b xiao_ble -d <build>/migrator_base \
+west build --sysbuild -b xiao_ble -d <build>/migrator_base \
   esphome/components/nrf52/migrator
 ```
 
 against the `framework-zephyr` NCS workspace and the `gnuarmemb` toolchain the
 nrf52 platform already provides (`ZEPHYR_BASE` / `GNUARMEMB_TOOLCHAIN_PATH` are
-set from the resolved PlatformIO package dirs). The resulting **unsigned**
-`build/zephyr/zephyr.bin` is the base: patching the blob changes the image
+set from the resolved PlatformIO package dirs). On NCS 2.9 this is a sysbuild
+build, so the unsigned base lands in the `migrator` domain subdir
+(`<build>/migrator_base/migrator/zephyr/zephyr.bin`, resolved from
+`domains.yaml`), not the legacy `<build>/zephyr/zephyr.bin`. The migrator's own
+`child_image/` tree is inert under sysbuild and unused by the artifact: the base
+is a plain app that the packaging script imgtool-headers for fw1's slot. That
+**unsigned** base is what gets patched: injecting the blob changes the image
 bytes, so signing happens *after* injection. The script then overwrites the
 `mig_blob` placeholder with this build's relocated fw2 MCUboot and runs
 `imgtool sign` (signature type *none*, fw1's single-slot size) to produce
