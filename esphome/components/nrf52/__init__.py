@@ -599,6 +599,21 @@ async def to_code(config: ConfigType) -> None:
     # disable console
     zephyr_add_prj_conf("UART_CONSOLE", False)
     zephyr_add_prj_conf("CONSOLE", False, False)
+    # Disable the hardware UARTE (uart0) in the APPLICATION overlay. Everything on
+    # this board runs over USB-CDC (console, shell, mcumgr), so nothing uses uart0,
+    # but the Zephyr UARTE shim still STARTRXes it at boot (~0.5-1 mA), and its RX
+    # pad (P1.12 on xiao_ble) collides with the I2C SCL some nodes wire on D7. The
+    # mcuboot child-image overlays already disable it; the running app did not.
+    # Unconditional: the `status = "disabled"` overlay is identical on NCS <2.9.2
+    # and >=2.9.2 (unlike the DCDC/NFC nodes below). ESPHome has no nRF52/Zephyr
+    # hardware-UART backend, so this can never conflict with a `uart:` bus.
+    zephyr_add_overlay(
+        """
+            &uart0 {
+                status = "disabled";
+            };
+        """
+    )
     # use NFC pins as GPIO
     if framework_ver < cv.Version(2, 9, 2):
         zephyr_add_prj_conf("NFCT_PINS_AS_GPIOS", True)
