@@ -1,0 +1,38 @@
+/*
+ * Migrator board overlay (xiao_ble). Trims the device tree to the bare minimum:
+ * the migrator only touches NVMC/UICR registers directly and resets. Disabling
+ * the watchdog node reinforces prj.conf's CONFIG_WATCHDOG=n
+ * (BOOTLOADER_UPDATER_PLAN.md 6.3 -- the WDT must never start).
+ */
+
+&wdt0 {
+	status = "disabled";
+};
+
+&zephyr_udc0 {
+	status = "disabled";
+};
+
+&usb_cdc_acm_uart {
+	status = "disabled";
+};
+
+&adc {
+	status = "disabled";
+};
+
+&i2c1 {
+	status = "disabled";
+};
+
+&spi2 {
+	status = "disabled";
+};
+
+&qspi {
+	status = "disabled";
+};
+
+&uart0 {
+	status = "disabled";
+};

@@ -1,0 +1,50 @@
+Import("env")  # noqa: F821
+
+# Compile lib_deps source files into the Zephyr application.
+#
+# The Zephyr framework integration (framework-zephyr's platformio-build.py) builds
+# the firmware from a generated CMakeLists `target_sources(app PRIVATE ...)` list,
+# and it stubs out PlatformIO's normal library construction (the Library builder is
+# a no-op). For each lib_dep it adds only the library's INCLUDE dirs to the compile
+# flags -- never its source files. So a lib_deps entry with real sources (e.g.
+# noise-c, libsodium) has its headers resolve (compilation succeeds) but its objects
+# are never built, and every symbol it provides is undefined at link.
+#
+# This post-script closes that gap: it collects the source files of every used
+# library builder and appends them to PIOBUILDFILES_FINAL, the same list the
+# framework's dontGenerateProgram() reads to emit target_sources. The result is that
+# library sources are compiled into the Zephyr app alongside the project sources,
+# using the lib include dirs the framework already adds to the global flags.
+
+_SOURCE_EXTENSIONS = (".c", ".cpp", ".cc", ".cxx", ".s", ".S", ".asm")
+
+
+def _collect_lib_sources(env):
+    from SCons.Script import DefaultEnvironment
+
+    sources = []
+    for lib_builder in env.GetLibBuilders():
+        # Only libraries the LDF found to be actually used by the project.
+        if not lib_builder.dependent:
+            continue
+        try:
+            nodes = env.CollectBuildFiles(
+                lib_builder.build_dir,
+                lib_builder.src_dir,
+                src_filter=lib_builder.src_filter,
+            )
+        except Exception:  # noqa: BLE001 - never fail the build over a single lib
+            continue
+        for node in nodes:
+            path = node.srcnode().get_abspath()
+            if path.lower().endswith(_SOURCE_EXTENSIONS):
+                sources.append(path)
+
+    if sources:
+        # dontGenerateProgram() reads PIOBUILDFILES_FINAL off DefaultEnvironment();
+        # mirror dontGenerateObject() and append there so these land in the
+        # generated target_sources().
+        DefaultEnvironment().Append(PIOBUILDFILES_FINAL=sources)
+
+
+_collect_lib_sources(env)  # noqa: F821

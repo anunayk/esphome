@@ -1,0 +1,538 @@
+"""Build-time packaging for the fw1 -> fw2 (Option B) migrator image.
+
+Runs as a PlatformIO post action on the two-slot relocated fw2 build. It:
+
+  1. compiles the standalone migrator Zephyr app from source (`west build`) to
+     produce the unsigned base image -- so no binary is committed in-tree,
+  2. extracts the relocated fw2 MCUboot bytes from this build's merged.hex
+     (the `mcuboot` partition at 0x1000),
+  3. injects them into the freshly built base by overwriting the
+     `struct mig_blob` placeholder (located by its 16-byte magic),
+  4. signs the result for fw1's single application slot with imgtool, producing
+     `xiao_ble_mcuboot_migrator.img`.
+
+The pure functions (read_intel_hex, extract_fw2_bootloader, inject_blob) are
+unit-tested in tests/unit_tests/test_nrf52_migrator.py. The imgtool signing step
+runs only inside the PlatformIO environment.
+
+Layout constants are parsed from migrator/migrator_layout.h so the C app and
+this script can never drift -- see BOOTLOADER_UPDATER_PLAN.md.
+"""
+
+from __future__ import annotations
+
+import os
+from pathlib import Path
+import re
+import struct
+import subprocess
+import sys
+import tempfile
+import zlib
+
+import yaml
+
+OUTPUT_NAME = "xiao_ble_mcuboot_migrator.img"
+
+
+class MigratorError(ValueError):
+    pass
+
+
+# This file is both a PlatformIO post-build script (executed by SCons with no
+# `__file__` and no access to the component source tree) and a plain importable
+# module for the unit tests (run via runpy, where `__file__` is defined). SCons
+# injects the `Import`/`env` builtins; detect that to pick the right roots.
+try:
+    Import("env")  # noqa: F821  (SCons builtin)
+    _PIO_ENV = env  # noqa: F821
+except Exception:  # noqa: BLE001 -- NameError under runpy; be defensive otherwise
+    _PIO_ENV = None
+
+
+def _resolve_migrator_src_dir() -> Path:
+    """Return the standalone migrator Zephyr app source dir for this context.
+
+    Under PlatformIO the nrf52 ``to_code`` copies the whole app tree into the
+    build's project dir under ``migrator/`` (see nrf52/__init__.py), where the
+    post-build step compiles it; under runpy/pytest it lives in the component
+    source tree next to this file.
+    """
+    if _PIO_ENV is not None:
+        return Path(_PIO_ENV.subst("$PROJECT_DIR")) / "migrator"
+    return Path(__file__).resolve().parent / "migrator"
+
+
+MIGRATOR_SRC_DIR = _resolve_migrator_src_dir()
+LAYOUT_HEADER = MIGRATOR_SRC_DIR / "migrator_layout.h"
+
+# fw1's single application slot (xiao_ble_mcuboot_usb_cdc_recovery layout). The
+# migrator image is uploaded here via fw1 serial recovery, so it must fit.
+FW1_APP_SLOT_SIZE = 0x78000
+# Standard MCUboot image header size / flash write alignment on nRF52.
+MCUBOOT_HEADER_SIZE = 0x200
+MCUBOOT_WRITE_ALIGN = 4
+
+# struct mig_blob header layout (see migrator/src/migrator.h). 16-byte magic,
+# then four little-endian u32s, then the payload.
+_BLOB_MAGIC_LEN = 16
+_BLOB_HEADER_SIZE = 32
+_OFF_BLOB_LEN = 16
+_OFF_BLOB_CRC32 = 20
+_OFF_TARGET_ADDR = 24
+_OFF_FORMAT_VERSION = 28
+_OFF_DATA = _BLOB_HEADER_SIZE
+
+
+def _load_layout() -> dict[str, int]:
+    """Parse the MIG_* #defines from migrator_layout.h (single source of truth).
+
+    Resolves simple `#define A B` aliases to other MIG_* defines so the script
+    sees the same numbers the C compiler does.
+    """
+    text = LAYOUT_HEADER.read_text(encoding="utf-8")
+    raw: dict[str, str] = dict(
+        re.findall(r"^#define\s+(MIG_[A-Z0-9_]+)\s+(\S+)", text, flags=re.MULTILINE)
+    )
+
+    resolved: dict[str, int] = {}
+
+    def resolve(name: str, _seen: tuple[str, ...] = ()) -> int | None:
+        if name in resolved:
+            return resolved[name]
+        if name not in raw or name in _seen:
+            return None
+        token = raw[name].rstrip("u").rstrip("U")
+        try:
+            value = int(token, 0)
+        except ValueError:
+            value = resolve(token, _seen + (name,))
+        if value is not None:
+            resolved[name] = value
+        return value
+
+    for name in raw:
+        resolve(name)
+    return resolved
+
+
+_LAYOUT = _load_layout()
+BLOB_MAGIC = b"ESPHOMENRF52BLOB"
+FW2_BOOTLOADER_ADDR = _LAYOUT["MIG_FW2_BOOTLOADER_ADDR"]
+FW2_BOOTLOADER_SIZE = _LAYOUT["MIG_FW2_BOOTLOADER_SIZE"]
+FW2_PRIMARY_ADDR = _LAYOUT["MIG_FW2_PRIMARY_ADDR"]
+FW2_PRIMARY_SIZE = _LAYOUT["MIG_FW2_PRIMARY_SIZE"]
+FW2_SECONDARY_ADDR = _LAYOUT["MIG_FW2_SECONDARY_ADDR"]
+FW2_SECONDARY_SIZE = _LAYOUT["MIG_FW2_SECONDARY_SIZE"]
+FW2_SETTINGS_ADDR = _LAYOUT["MIG_FW2_SETTINGS_ADDR"]
+FW2_SETTINGS_SIZE = _LAYOUT["MIG_FW2_SETTINGS_SIZE"]
+BLOB_CAPACITY = _LAYOUT["MIG_BLOB_CAPACITY"]
+
+EXPECTED_PARTITIONS = {
+    "mcuboot": (FW2_BOOTLOADER_ADDR, FW2_BOOTLOADER_ADDR + FW2_BOOTLOADER_SIZE),
+    "mcuboot_primary": (FW2_PRIMARY_ADDR, FW2_PRIMARY_ADDR + FW2_PRIMARY_SIZE),
+    "mcuboot_secondary": (
+        FW2_SECONDARY_ADDR,
+        FW2_SECONDARY_ADDR + FW2_SECONDARY_SIZE,
+    ),
+}
+
+
+class IntelHexError(MigratorError):
+    pass
+
+
+def _parse_record(line: str, line_number: int) -> tuple[int, int, bytes]:
+    line = line.strip()
+    if not line:
+        raise IntelHexError(f"Line {line_number}: empty Intel HEX record")
+    if not line.startswith(":"):
+        raise IntelHexError(f"Line {line_number}: missing ':' prefix")
+    try:
+        raw = bytes.fromhex(line[1:])
+    except ValueError as err:
+        raise IntelHexError(f"Line {line_number}: invalid hex data") from err
+    if len(raw) < 5:
+        raise IntelHexError(f"Line {line_number}: record is too short")
+    length = raw[0]
+    if len(raw) != length + 5:
+        raise IntelHexError(
+            f"Line {line_number}: expected {length + 5} bytes, got {len(raw)}"
+        )
+    if sum(raw) & 0xFF:
+        raise IntelHexError(f"Line {line_number}: invalid checksum")
+    address = (raw[1] << 8) | raw[2]
+    return address, raw[3], raw[4:-1]
+
+
+def read_intel_hex(path: Path) -> dict[int, int]:
+    data: dict[int, int] = {}
+    upper_address = 0
+    saw_eof = False
+    with Path(path).open("r", encoding="utf-8") as file:
+        for line_number, line in enumerate(file, start=1):
+            address, record_type, payload = _parse_record(line, line_number)
+            if record_type == 0x00:
+                base = upper_address + address
+                for offset, byte in enumerate(payload):
+                    data[base + offset] = byte
+            elif record_type == 0x01:
+                saw_eof = True
+                break
+            elif record_type == 0x04:
+                if len(payload) != 2:
+                    raise IntelHexError(
+                        f"Line {line_number}: extended linear address must be 2 bytes"
+                    )
+                upper_address = ((payload[0] << 8) | payload[1]) << 16
+            elif record_type in (0x02, 0x03, 0x05):
+                continue
+            else:
+                raise IntelHexError(
+                    f"Line {line_number}: unsupported record type {record_type}"
+                )
+    if not saw_eof:
+        raise IntelHexError(f"{path}: missing EOF record")
+    return data
+
+
+def _checksum(record: bytes) -> int:
+    return (-sum(record)) & 0xFF
+
+
+def _record(address: int, record_type: int, payload: bytes = b"") -> str:
+    body = (
+        bytes([len(payload), (address >> 8) & 0xFF, address & 0xFF, record_type])
+        + payload
+    )
+    return ":" + (body + bytes([_checksum(body)])).hex().upper()
+
+
+def write_intel_hex(path: Path, data: dict[int, int]) -> None:
+    """Minimal Intel HEX writer (test helper, mirrors the artifact script)."""
+    lines: list[str] = []
+    current_upper = None
+    addresses = sorted(data)
+    index = 0
+    while index < len(addresses):
+        address = addresses[index]
+        upper = address >> 16
+        if upper != current_upper:
+            lines.append(_record(0, 0x04, upper.to_bytes(2, "big")))
+            current_upper = upper
+        chunk = bytearray()
+        chunk_start = address
+        while index < len(addresses) and len(chunk) < 16:
+            next_address = addresses[index]
+            if next_address != chunk_start + len(chunk) or next_address >> 16 != upper:
+                break
+            chunk.append(data[next_address])
+            index += 1
+        lines.append(_record(chunk_start & 0xFFFF, 0x00, bytes(chunk)))
+    lines.append(_record(0, 0x01))
+    Path(path).write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def extract_fw2_bootloader(
+    data: dict[int, int],
+    start: int = FW2_BOOTLOADER_ADDR,
+    size: int = FW2_BOOTLOADER_SIZE,
+) -> bytes:
+    """Flatten the relocated fw2 MCUboot region into position-less bytes.
+
+    Gaps inside the image are filled with 0xFF (erased flash); trailing 0xFF is
+    trimmed so the migrator programs as few words as possible. The result is
+    what the migrator writes to `start` on the target.
+    """
+    end = start + size
+    if start not in data:
+        raise MigratorError(
+            f"fw2 bootloader does not start at 0x{start:08X} "
+            "(is this the relocated two-slot build?)"
+        )
+    # Only the bootloader region [start, end) is extracted; the primary slot
+    # that legitimately follows at `end` is left to fw2's own DFU.
+    region_max = max(address for address in data if start <= address < end)
+    extracted = bytes(
+        data.get(address, 0xFF) for address in range(start, region_max + 1)
+    )
+    return extracted.rstrip(b"\xff")
+
+
+def locate_blob(base_bin: bytes) -> int:
+    """Return the offset of the mig_blob placeholder in the base binary.
+
+    The 16-byte magic legitimately appears more than once: src/blob.c reserves
+    it at the head of the placeholder struct, and src/main.c embeds the same
+    literal in .rodata to validate the injected blob at runtime. Disambiguate by
+    the placeholder's unique signature -- an unpatched placeholder has a full
+    MIG_BLOB_CAPACITY run of 0xFF (erased) bytes in its data[] region, which the
+    .rodata copy of the magic never has.
+    """
+    blank = b"\xff" * BLOB_CAPACITY
+    candidates: list[int] = []
+    start = base_bin.find(BLOB_MAGIC)
+    while start >= 0:
+        data_start = start + _OFF_DATA
+        data_end = data_start + BLOB_CAPACITY
+        if data_end <= len(base_bin) and base_bin[data_start:data_end] == blank:
+            candidates.append(start)
+        start = base_bin.find(BLOB_MAGIC, start + 1)
+    if not candidates:
+        raise MigratorError(
+            "migrator base binary has no mig_blob placeholder (magic + a blank "
+            f"0x{BLOB_CAPACITY:X}-byte capacity region) -- is it the unsigned "
+            "zephyr.bin from the migrator app build?"
+        )
+    if len(candidates) > 1:
+        raise MigratorError(
+            f"mig_blob placeholder is ambiguous: {len(candidates)} blank "
+            "capacity regions found in the base binary"
+        )
+    return candidates[0]
+
+
+def inject_blob(
+    base_bin: bytes, fw2_bytes: bytes, target_addr: int = FW2_BOOTLOADER_ADDR
+) -> bytes:
+    """Overwrite the mig_blob placeholder with the fw2 bootloader payload.
+
+    Patches blob_len / blob_crc32 / target_addr and the data[] payload (0xFF
+    padded to capacity) in place, leaving format_version and the rest of the
+    image untouched.
+    """
+    if not fw2_bytes:
+        raise MigratorError("refusing to inject an empty fw2 bootloader")
+    if len(fw2_bytes) > BLOB_CAPACITY:
+        raise MigratorError(
+            f"fw2 bootloader is 0x{len(fw2_bytes):X} bytes, exceeds blob "
+            f"capacity 0x{BLOB_CAPACITY:X}"
+        )
+    offset = locate_blob(base_bin)
+    data_start = offset + _OFF_DATA
+    if data_start + BLOB_CAPACITY > len(base_bin):
+        raise MigratorError("mig_blob placeholder is truncated in the base binary")
+
+    patched = bytearray(base_bin)
+    struct.pack_into("<I", patched, offset + _OFF_BLOB_LEN, len(fw2_bytes))
+    struct.pack_into(
+        "<I", patched, offset + _OFF_BLOB_CRC32, zlib.crc32(fw2_bytes) & 0xFFFFFFFF
+    )
+    struct.pack_into("<I", patched, offset + _OFF_TARGET_ADDR, target_addr)
+    padded = fw2_bytes + b"\xff" * (BLOB_CAPACITY - len(fw2_bytes))
+    patched[data_start : data_start + BLOB_CAPACITY] = padded
+    return bytes(patched)
+
+
+def _validate_partitions(path: Path) -> None:
+    partitions = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
+    if not isinstance(partitions, dict):
+        raise MigratorError(f"{path}: invalid partition map")
+    for name, (expected_start, expected_end) in EXPECTED_PARTITIONS.items():
+        partition = partitions.get(name)
+        if not isinstance(partition, dict):
+            raise MigratorError(f"{path}: missing {name} partition")
+        actual_start = partition.get("address")
+        actual_end = partition.get("end_address")
+        if actual_start != expected_start or actual_end != expected_end:
+            raise MigratorError(
+                f"{path}: {name} is 0x{actual_start:08X}..0x{actual_end:08X}, "
+                f"expected 0x{expected_start:08X}..0x{expected_end:08X} "
+                "(Option B relocated layout)"
+            )
+
+
+def _imgtool_sign(unsigned: Path, output: Path) -> None:
+    """Sign the patched migrator for fw1's single slot (signature type none)."""
+    cmd = [
+        "imgtool",
+        "sign",
+        "--header-size",
+        hex(MCUBOOT_HEADER_SIZE),
+        "--align",
+        str(MCUBOOT_WRITE_ALIGN),
+        "--version",
+        "0.0.0",
+        "--pad-header",
+        "--slot-size",
+        hex(FW1_APP_SLOT_SIZE),
+        str(unsigned),
+        str(output),
+    ]
+    try:
+        subprocess.run(cmd, check=True, capture_output=True, text=True)
+    except FileNotFoundError as err:
+        raise MigratorError(
+            "imgtool not found; cannot sign the migrator image"
+        ) from err
+    except subprocess.CalledProcessError as err:
+        raise MigratorError(f"imgtool sign failed: {err.stderr}") from err
+
+
+def _build_base(env) -> bytes:
+    """Compile the standalone migrator Zephyr app and return its unsigned base.
+
+    Runs ``west build -b xiao_ble`` against the framework-zephyr NCS workspace
+    and the gnuarmemb toolchain that the nrf52 platform already provides, and
+    returns ``build/zephyr/zephyr.bin`` -- the unsigned, MCUboot-headered image
+    whose ``mig_blob`` placeholder this script then patches. Built fresh on every
+    run so the base always matches the committed migrator source; nothing is
+    committed in-tree.
+    """
+    platform = env.PioPlatform()
+    zephyr_pkg = Path(platform.get_package_dir("framework-zephyr"))
+    toolchain_pkg = Path(platform.get_package_dir("toolchain-gccarmnoneeabi"))
+    if not zephyr_pkg.is_dir():
+        raise MigratorError(
+            "framework-zephyr package not found; cannot build the migrator base"
+        )
+    # The nrf52 platform pins `toolchain-gccarmnoneeabi` to the Zephyr SDK
+    # (sdk-ng), not a gnuarmemb GCC. Use the SDK the same way the platform's
+    # framework-zephyr/scripts/platformio/platformio-build.py does: point
+    # `Zephyr-sdk_DIR` at it and put arm-zephyr-eabi/bin on PATH (do NOT force
+    # ZEPHYR_TOOLCHAIN_VARIANT=gnuarmemb -- that looks for an arm-none-eabi-gcc
+    # the SDK package does not contain).
+    sdk_roots = sorted(toolchain_pkg.glob("zephyr-sdk-*"))
+    if not sdk_roots:
+        raise MigratorError(
+            f"Zephyr SDK not found under {toolchain_pkg}; cannot build the "
+            "migrator base"
+        )
+    sdk_root = sdk_roots[-1]
+    build_dir = Path(env.subst("$BUILD_DIR")) / "migrator_base"
+    build_env = dict(os.environ)
+    build_env["ZEPHYR_BASE"] = str(zephyr_pkg / "zephyr")
+    build_env["Zephyr-sdk_DIR"] = str(sdk_root / "cmake")
+    build_env["PATH"] = os.pathsep.join(
+        [str(sdk_root / "arm-zephyr-eabi" / "bin"), build_env.get("PATH", "")]
+    )
+    # `west` runs from within the NCS workspace; --pristine always keeps the
+    # base reproducible regardless of any stale build artifacts. --sysbuild
+    # pins the multi-image system: NCS 2.9 already defaults to sysbuild, and
+    # forcing it keeps the output layout (_locate_base_bin) deterministic across
+    # NCS versions. The migrator needs no child bootloader of its own -- it is a
+    # plain app that this script imgtool-headers for fw1's slot -- so sysbuild
+    # builds only the `migrator` domain (the legacy migrator/child_image/ tree is
+    # inert under sysbuild and unused by the artifact).
+    cmd = [
+        sys.executable,
+        "-m",
+        "west",
+        "build",
+        "--pristine",
+        "always",
+        "--sysbuild",
+        "-b",
+        "xiao_ble",
+        "-d",
+        str(build_dir),
+        str(MIGRATOR_SRC_DIR),
+    ]
+    try:
+        subprocess.run(
+            cmd,
+            check=True,
+            cwd=str(zephyr_pkg),
+            env=build_env,
+            capture_output=True,
+            text=True,
+        )
+    except FileNotFoundError as err:
+        raise MigratorError(
+            "could not run `west` to build the migrator base; ensure west is "
+            "available in the build environment (python -m west)"
+        ) from err
+    except subprocess.CalledProcessError as err:
+        raise MigratorError(
+            f"west build of the migrator base failed:\n{err.stderr}"
+        ) from err
+    return _locate_base_bin(build_dir).read_bytes()
+
+
+def _locate_base_bin(build_dir: Path) -> Path:
+    """Return the unsigned migrator ``zephyr.bin`` from a west build dir.
+
+    A sysbuild ``west build`` (NCS 2.9 default, and forced in ``_build_base``)
+    puts the application image in a per-domain subdir
+    ``<build>/<domain>/zephyr/zephyr.bin`` rather than the legacy
+    ``<build>/zephyr/zephyr.bin``. Resolve the default domain from the
+    ``domains.yaml`` sysbuild emits, then fall back to the legacy
+    (non-sysbuild) path so this keeps working either way.
+    """
+    candidates: list[Path] = []
+    domains_file = build_dir / "domains.yaml"
+    if domains_file.is_file():
+        try:
+            domains = yaml.safe_load(domains_file.read_text(encoding="utf-8")) or {}
+        except yaml.YAMLError:
+            domains = {}
+        default = domains.get("default")
+        for entry in domains.get("domains", []):
+            if not isinstance(entry, dict):
+                continue
+            if default is None or entry.get("name") == default:
+                domain_dir = entry.get("build_dir")
+                if domain_dir:
+                    candidates.append(Path(domain_dir) / "zephyr" / "zephyr.bin")
+    # Legacy / non-sysbuild layout (and the pre-2.9 path).
+    candidates.append(build_dir / "zephyr" / "zephyr.bin")
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    searched = ", ".join(str(candidate) for candidate in candidates)
+    raise MigratorError(f"migrator base zephyr.bin not produced (searched: {searched})")
+
+
+def build_migrator_image(
+    merged_hex: Path, output_path: Path, base_bin: bytes
+) -> int:
+    """Extract, inject, and sign. Returns the final image size in bytes."""
+    data = read_intel_hex(merged_hex)
+    fw2_bytes = extract_fw2_bootloader(data)
+    patched = inject_blob(base_bin, fw2_bytes)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory() as work_dir:
+        unsigned = Path(work_dir) / "migrator_patched.bin"
+        unsigned.write_bytes(patched)
+        _imgtool_sign(unsigned, output_path)
+    size = output_path.stat().st_size
+    if size > FW1_APP_SLOT_SIZE:
+        raise MigratorError(
+            f"migrator image is 0x{size:X} bytes, exceeds fw1's app slot "
+            f"0x{FW1_APP_SLOT_SIZE:X}"
+        )
+    return size
+
+
+def _platformio_generate_artifact(source, target, env) -> None:
+    build_dir = Path(env.subst("$BUILD_DIR"))
+    zephyr_dir = build_dir / "zephyr"
+    partitions = build_dir / "partitions.yml"
+    if partitions.is_file():
+        _validate_partitions(partitions)
+    for input_name in ("merged.hex", "zephyr.hex"):
+        input_path = zephyr_dir / input_name
+        if input_path.is_file():
+            print("[nrf52 migrator] building migrator base from source...")
+            base_bin = _build_base(env)
+            size = build_migrator_image(
+                input_path, zephyr_dir / OUTPUT_NAME, base_bin
+            )
+            print(f"[nrf52 migrator] wrote {OUTPUT_NAME} ({size} bytes)")
+            return
+    raise MigratorError(
+        f"no Zephyr HEX input at {zephyr_dir / 'merged.hex'} or "
+        f"{zephyr_dir / 'zephyr.hex'}"
+    )
+
+
+if _PIO_ENV is not None:
+    _PIO_ENV.AddPostAction(
+        "$BUILD_DIR/firmware.hex", _platformio_generate_artifact
+    )
+    _PIO_ENV.AddPostAction(
+        "$BUILD_DIR/zephyr/merged.hex", _platformio_generate_artifact
+    )
+    _PIO_ENV.AddPostAction(
+        "$BUILD_DIR/zephyr/zephyr.hex", _platformio_generate_artifact
+    )

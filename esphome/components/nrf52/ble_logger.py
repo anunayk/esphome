@@ -27,7 +27,18 @@ def is_mac_address(value: str) -> bool:
 
 async def logger_scan(name: str) -> BLEDevice | None:
     _LOGGER.info("Scanning bluetooth for %s...", name)
-    device = await BleakScanner.find_device_by_name(name)
+
+    # `name` is CORE.name, the base esphome name. With name_add_mac_suffix the
+    # device advertises "<name>-<mac>" (e.g. "b-a1b2c3"), so an exact match would
+    # miss it; accept the base name or the "<name>-" prefix. The trailing dash
+    # keeps the prefix from also matching an unrelated longer name.
+    def matches(device: BLEDevice, adv) -> bool:
+        adv_name = adv.local_name or device.name
+        return adv_name is not None and (
+            adv_name == name or adv_name.startswith(f"{name}-")
+        )
+
+    device = await BleakScanner.find_device_by_filter(matches)
     if not device:
         _LOGGER.error("%s Bluetooth LE device was not found!", name)
     return device
