@@ -7,11 +7,17 @@ import logging
 from pathlib import Path
 
 from bleak.exc import BleakDBusError, BleakDeviceNotFoundError
+from smp.error import MGMT_ERR
 from smp.exceptions import SMPBadStartDelimiter
+from smp.image_management import IMG_MGMT_ERR
 from smpclient import SMPClient
 from smpclient.generics import SMPRequest, error, success
 from smpclient.mcuboot import IMAGE_TLV, ImageInfo, MCUBootImageError, TLVNotFound
-from smpclient.requests.image_management import ImageStatesRead, ImageStatesWrite
+from smpclient.requests.image_management import (
+    ImageErase,
+    ImageStatesRead,
+    ImageStatesWrite,
+)
 from smpclient.requests.os_management import ResetWrite
 from smpclient.transport import SMPTransportDisconnected
 from smpclient.transport.ble import (
@@ -29,6 +35,7 @@ from .const import SMP_UDP_LINK_MTU, SMP_UDP_PORT
 
 BLE_SCAN_TIMEOUT = 10.0  # seconds
 RESET_DELAY = 2.0  # seconds to wait before reset, allows on_end action to execute
+ERASE_TIMEOUT = 30.0  # seconds; flash-erasing the secondary slot can take a while
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -42,6 +49,14 @@ def _json_state(o: object) -> object:
     if hasattr(o, "__dict__"):
         return vars(o)
     return str(o)
+
+
+def _is_no_free_slot(response: object) -> bool:
+    """True if an SMP image-management error response is NO_FREE_SLOT."""
+    # SMP v2 image-management errors carry an `err` whose `rc` is an
+    # IMG_MGMT_ERR; for other groups the enum differs so the comparison is False.
+    err = getattr(response, "err", None)
+    return err is not None and getattr(err, "rc", None) == IMG_MGMT_ERR.NO_FREE_SLOT
 
 
 async def smpmgr_scan(name: str) -> str:
@@ -199,13 +214,20 @@ async def _smpmgr_upload_connected(
             smp_client, ImageStatesRead, read_timeout, retries, target
         )
     except SMPBadStartDelimiter as exc:
-        raise EsphomeError(f"mcumgr is not supported by device ({device})") from exc
+        raise EsphomeError(
+            f"mcumgr is not responding on {device}. Install MCUboot first, "
+            "or reset the board into MCUboot recovery mode and retry."
+        ) from exc
     except EsphomeError as exc:
         if udp:
             raise SMPUnreachableError(str(exc)) from exc
-        raise EsphomeError(f"mcumgr is not supported by device ({device})") from exc
+        raise EsphomeError(
+            f"mcumgr is not responding on {device}. Install MCUboot first, "
+            "or reset the board into MCUboot recovery mode and retry."
+        ) from exc
 
     already_uploaded = False
+    stale_slot: int | None = None
 
     if error(image_state):
         raise EsphomeError(f"Failed to read image state from {device}: {image_state}")
@@ -227,15 +249,36 @@ async def _smpmgr_upload_connected(
                 raise EsphomeError("The same image already confirmed")
             _LOGGER.warning("The same image already uploaded")
             already_uploaded = True
-        elif any(image.pending and not image.active for image in images):
-            # The device refuses to erase or overwrite a pending slot (NO_FREE_SLOT).
-            # The image states carry no size, so the cause cannot be told from here.
-            raise EsphomeError(
-                f"{device} still has an earlier update pending. Restart the device to "
-                "apply it; if it then still runs the old firmware, the image was probably "
-                "too large for the MCUboot slot and the device must be flashed once over "
-                "USB to clear it."
+        else:
+            stale_slot = next(
+                (image.slot for image in images if image.pending and not image.active),
+                None,
             )
+    if stale_slot is not None and not already_uploaded:
+        _LOGGER.info(
+            "Erasing stale pending image in slot %d to free the secondary slot",
+            stale_slot,
+        )
+        r = await smp_client.request(ImageErase(slot=stale_slot), ERASE_TIMEOUT)
+        if error(r) and _is_no_free_slot(r):
+            # The running firmware was built without
+            # CONFIG_MCUMGR_GRP_IMG_ALLOW_ERASE_PENDING, so mcumgr refuses to
+            # erase the pending slot and would also refuse the upload below with
+            # the same NO_FREE_SLOT error. There is no remote way out of this:
+            # the pending swap must be cleared via serial recovery.
+            raise EsphomeError(
+                f"Slot {stale_slot} on {device} holds a pending image from a "
+                "previous OTA that this firmware will not let mcumgr erase, so a "
+                "new image cannot be uploaded over BLE. Recover by resetting the "
+                "board into USB CDC MCUboot serial recovery and re-uploading over "
+                "serial; the resulting firmware allows erasing a pending slot, so "
+                "later BLE OTAs will work."
+            )
+        if error(r):
+            # Other errors (e.g. single-slot MCUboot reporting ENOTSUP) are not
+            # fatal -- let the upload below surface a genuine error if the slot
+            # really is not free.
+            _LOGGER.warning("Image erase of slot %d reported: %s", stale_slot, r)
 
     if not already_uploaded:
         with firmware.open("rb") as file:
@@ -263,14 +306,41 @@ async def _smpmgr_upload_connected(
         target,
     )
     if error(r):
-        raise EsphomeError(f"Failed to mark image for testing on {device}: {r}")
+        # MCUboot serial recovery does not implement "set image state"
+        # (test/confirm/swap) and returns ENOTSUP -- this is true for BOTH the
+        # single-slot usb_cdc_recovery (fw1) bootloader AND the two-slot fw2
+        # bootloader's recovery mode, so it is NOT a fw1-vs-fw2 indicator. The
+        # image is already written to the primary slot and boots directly on
+        # reset, so ENOTSUP here is expected, not fatal.
+        if getattr(r, "rc", None) == MGMT_ERR.ENOTSUP:
+            _LOGGER.info(
+                "Set-image-state not supported in MCUboot serial recovery; "
+                "the uploaded image will boot on reset"
+            )
+        else:
+            raise EsphomeError(f"Failed to mark image for testing on {device}: {r}")
 
     await asyncio.sleep(RESET_DELAY)
     _LOGGER.info("Reset")
     if udp:
         await _udp_reset(smp_client, device, image_tlv_sha256)
         return
-    r = await smp_client.request(ResetWrite(), write_timeout)
+    try:
+        r = await smp_client.request(ResetWrite(), write_timeout)
+    except TimeoutError:
+        # The device may reset before it can reply; that is still a success.
+        r = None
 
-    if error(r):
+    # Single-slot MCUboot serial recovery answers reset with an error-typed
+    # frame carrying rc=EOK (and may not actually reboot until a physical reset);
+    # treat EOK/ENOTSUP as success so a completed upload is not reported failed.
+    if (
+        r is not None
+        and error(r)
+        and getattr(r, "rc", None)
+        not in (
+            MGMT_ERR.EOK,
+            MGMT_ERR.ENOTSUP,
+        )
+    ):
         raise EsphomeError(f"Failed to reset {device}: {r}")
