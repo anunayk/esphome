@@ -1123,6 +1123,19 @@ def _generate_cmake_lists() -> tuple[bool, list[Path]]:
 
     module_dirs = generate_zephyr_modules(list(CORE.platformio_libraries.values()))
 
+    # Honour `-I` build flags (cg.add_build_flag("-I<dir>")) on the app compile.
+    # get_project_compile_flags() intentionally forwards only -D/-W (it is shared
+    # with the ESP-IDF backend, which resolves extra includes through registered
+    # IDF components instead), so a bare include-dir build flag -- e.g. a component
+    # pointing at a prebuilt library's headers -- would otherwise be dropped here.
+    # The PlatformIO Zephyr path folded every build flag into CMAKE_CXX_FLAGS; add
+    # the include dirs to the app target so that behaviour carries over.
+    include_dirs = sorted(
+        flag[2:].strip().replace("\\", "/")
+        for flag in CORE.build_flags
+        if flag.startswith("-I") and flag[2:].strip()
+    )
+
     lines = [
         "cmake_minimum_required(VERSION 3.20.0)",
         "",
@@ -1135,7 +1148,10 @@ def _generate_cmake_lists() -> tuple[bool, list[Path]]:
         'file(GLOB_RECURSE APP_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_LIST_DIR}/../src/*.cpp" "${CMAKE_CURRENT_LIST_DIR}/../src/*.c")',
         "",
         "target_sources(app PRIVATE ${APP_SOURCES})",
-        'target_include_directories(app PRIVATE "${CMAKE_CURRENT_LIST_DIR}/../src")',
+        "target_include_directories(app PRIVATE",
+        '  "${CMAKE_CURRENT_LIST_DIR}/../src"',
+        *[f'  "{d}"' for d in include_dirs],
+        ")",
     ]
 
     if compile_flags:
