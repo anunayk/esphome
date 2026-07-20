@@ -10,7 +10,12 @@ import pytest
 
 from esphome.components import nrf52
 from esphome.components.zephyr import zephyr_data
-from esphome.components.zephyr.const import KEY_EXTRA_BUILD_FILES, KEY_PM_STATIC
+from esphome.components.zephyr.const import (
+    KEY_EXTRA_BUILD_FILES,
+    KEY_OVERLAY,
+    KEY_PM_STATIC,
+    KEY_SYSBUILD_CONF,
+)
 import esphome.config_validation as cv
 from esphome.const import KEY_CORE
 from esphome.core import CORE
@@ -69,7 +74,7 @@ def test_usb_cdc_recovery_rejects_unsupported_board(setup_core: Path) -> None:
         )
 
 
-def test_usb_cdc_recovery_registers_child_image_files(setup_core: Path) -> None:
+def test_usb_cdc_recovery_registers_sysbuild_files(setup_core: Path) -> None:
     _setup_core(setup_core)
     config = nrf52.CONFIG_SCHEMA(
         {
@@ -83,13 +88,26 @@ def test_usb_cdc_recovery_registers_child_image_files(setup_core: Path) -> None:
     CORE.flush_tasks()
 
     extra_build_files = zephyr_data()[KEY_EXTRA_BUILD_FILES]
+    # NCS >= 2.9.2 drives MCUboot through sysbuild and ignores the old
+    # zephyr/child_image/ tree: the Kconfig fragment is delivered to the MCUboot
+    # sysbuild image at zephyr/sysbuild/mcuboot.conf instead.
     assert (
-        extra_build_files["zephyr/child_image/mcuboot.conf"].name
+        extra_build_files["zephyr/sysbuild/mcuboot.conf"].name
         == "xiao_ble_mcuboot_usb_cdc_recovery.conf"
     )
+    assert "zephyr/child_image/mcuboot.conf" not in extra_build_files
+    assert "zephyr/child_image/mcuboot/boards/xiao_ble.overlay" not in extra_build_files
+    # The MCUboot DT overlay is delivered to the mcuboot image overlay and
+    # carries the board overlay plus the slot0_partition label the sysbuild
+    # image-sizing step requires. The application image gets slot0 too.
+    mcuboot_overlay = zephyr_data()[KEY_OVERLAY]["mcuboot"]
+    assert "zephyr,cdc-acm-uart = &cdc_acm_uart0;" in mcuboot_overlay
+    assert "slot0_partition: partition@1000" in mcuboot_overlay
+    assert "slot0_partition: partition@1000" in zephyr_data()[KEY_OVERLAY][""]
+    # Single-application-slot recovery bootloader: hash-only signing forced at
+    # the sysbuild level so it fits the tight Adafruit flash budget.
     assert (
-        extra_build_files["zephyr/child_image/mcuboot/boards/xiao_ble.overlay"].name
-        == "xiao_ble_mcuboot_usb_cdc_recovery.overlay"
+        zephyr_data()[KEY_SYSBUILD_CONF]["SB_CONFIG_BOOT_SIGNATURE_TYPE_NONE"] is True
     )
     assert (
         "post:xiao_ble_mcuboot_artifact.py" in CORE.platformio_options["extra_scripts"]
@@ -108,7 +126,7 @@ def test_usb_cdc_recovery_registers_child_image_files(setup_core: Path) -> None:
     ]
 
 
-def test_usb_cdc_recovery_child_image_files_contain_required_settings() -> None:
+def test_usb_cdc_recovery_mcuboot_files_contain_required_settings() -> None:
     conf = (NRF52_DIR / "xiao_ble_mcuboot_usb_cdc_recovery.conf").read_text(
         encoding="utf-8"
     )

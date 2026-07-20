@@ -19,6 +19,7 @@ from .const import (
     KEY_PM_STATIC,
     KEY_PRJ_CONF,
     KEY_SYSBUILD,
+    KEY_SYSBUILD_CONF,
     KEY_USER,
     KEY_ZEPHYR,
     zephyr_ns,
@@ -57,6 +58,7 @@ class ZephyrData(TypedDict):
     user: dict[str, list[str]]
     kconfig: str
     sysbuild: bool
+    sysbuild_conf: dict[str, PrjConfValueType]
 
 
 def zephyr_set_core_data(config: ConfigType) -> None:
@@ -75,6 +77,7 @@ def zephyr_set_core_data(config: ConfigType) -> None:
         # config says `bootloader: mcuboot`, so the image can be smaller. This was
         # the default behaviour in SDK 2.6.1.
         sysbuild=False,
+        sysbuild_conf={},
     )
 
 
@@ -211,6 +214,23 @@ def zephyr_add_pm_static(sections: list[Section]) -> None:
     zephyr_data()[KEY_PM_STATIC].extend(sections)
 
 
+def zephyr_add_sysbuild_conf(name: str, value: PrjConfValueType) -> None:
+    """Set a sysbuild-level Kconfig option (written to zephyr/sysbuild.conf).
+
+    These SB_CONFIG_* options drive the sysbuild image assembly itself (which
+    bootloader, signature type, ...) and cannot be overridden from an image's
+    own prj.conf, so they must be set here rather than via zephyr_add_prj_conf.
+    """
+    if not name.startswith("SB_CONFIG_"):
+        name = "SB_CONFIG_" + name
+    conf = zephyr_data()[KEY_SYSBUILD_CONF]
+    if name in conf and conf[name] != value:
+        raise ValueError(
+            f"{name} already set with value '{conf[name]}', cannot set again to '{value}'"
+        )
+    conf[name] = value
+
+
 def zephyr_add_user(key, value):
     user = zephyr_data()[KEY_USER]
     if key not in user:
@@ -259,7 +279,12 @@ def copy_files() -> None:
         )
 
         if image:
-            path = CORE.relative_build_path(f"sysbuild/{image}.conf")
+            # Sysbuild discovers per-image Kconfig fragments at
+            # ${APP_DIR}/sysbuild/<image>.conf, and the sdk-nrf PlatformIO
+            # builder points APP_DIR at the "zephyr/" subdir of the build tree
+            # (that is where prj.conf / sysbuild.conf live). So the fragment
+            # must land in zephyr/sysbuild/, not the build-root sysbuild/.
+            path = CORE.relative_build_path(f"zephyr/sysbuild/{image}.conf")
         else:
             path = CORE.relative_build_path("zephyr/prj.conf")
 
@@ -267,7 +292,9 @@ def copy_files() -> None:
 
     for image, content in zephyr_data()[KEY_OVERLAY].items():
         if image:
-            path = CORE.relative_build_path(f"sysbuild/{image}.overlay")
+            # See the per-image .conf note above: sysbuild reads the DT overlay
+            # from ${APP_DIR}/sysbuild/<image>.overlay, i.e. zephyr/sysbuild/.
+            path = CORE.relative_build_path(f"zephyr/sysbuild/{image}.overlay")
         else:
             path = CORE.relative_build_path("zephyr/app.overlay")
         changed |= write_file_if_changed(path, content)
@@ -303,6 +330,8 @@ def copy_files() -> None:
     sysbuild_conf = ""
     if zephyr_data()[KEY_SYSBUILD]:
         sysbuild_conf = "SB_CONFIG_BOOTLOADER_MCUBOOT=y\n"
+        for name, value in sorted(zephyr_data()[KEY_SYSBUILD_CONF].items()):
+            sysbuild_conf += f"{name}={_format_prj_conf_val(value)}\n"
     changed |= _write_file_if_changed_or_remove_when_empty(
         CORE.relative_build_path("zephyr/sysbuild.conf"), sysbuild_conf
     )

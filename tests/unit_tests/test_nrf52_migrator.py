@@ -12,7 +12,12 @@ import pytest
 
 from esphome.components import nrf52
 from esphome.components.zephyr import zephyr_data
-from esphome.components.zephyr.const import KEY_EXTRA_BUILD_FILES, KEY_PM_STATIC
+from esphome.components.zephyr.const import (
+    KEY_EXTRA_BUILD_FILES,
+    KEY_OVERLAY,
+    KEY_PM_STATIC,
+    KEY_SYSBUILD_CONF,
+)
 import esphome.config_validation as cv
 from esphome.const import KEY_CORE
 from esphome.core import CORE
@@ -266,7 +271,7 @@ def test_validate_partitions_rejects_wrong_bootloader_address(tmp_path: Path) ->
 # --- config wiring --------------------------------------------------------
 
 
-def test_two_slot_registers_child_images_and_pm_static(setup_core: Path) -> None:
+def test_two_slot_registers_sysbuild_images_and_pm_static(setup_core: Path) -> None:
     _setup_core(setup_core)
     config = nrf52.CONFIG_SCHEMA(
         {
@@ -280,22 +285,31 @@ def test_two_slot_registers_child_images_and_pm_static(setup_core: Path) -> None
     CORE.flush_tasks()
 
     extra_build_files = zephyr_data()[KEY_EXTRA_BUILD_FILES]
+    # NCS >= 2.9.2 sysbuild: the MCUboot Kconfig fragment goes to the mcuboot
+    # sysbuild image (zephyr/sysbuild/mcuboot.conf), not zephyr/child_image/.
     assert (
-        extra_build_files["zephyr/child_image/mcuboot.conf"].name
+        extra_build_files["zephyr/sysbuild/mcuboot.conf"].name
         == "xiao_ble_mcuboot_migrator.conf"
     )
+    assert "zephyr/child_image/mcuboot.conf" not in extra_build_files
+    assert "zephyr/child_image/mcuboot/boards/xiao_ble.overlay" not in extra_build_files
+    # The mcuboot DT overlay carries the migrator board overlay plus the
+    # slot0/slot1 partition labels the sysbuild image needs; the app image gets
+    # them too. Hash-only signing is forced at the sysbuild level.
+    mcuboot_overlay = zephyr_data()[KEY_OVERLAY]["mcuboot"]
+    assert "slot0_partition: partition@d000" in mcuboot_overlay
+    assert "slot1_partition: partition@80000" in mcuboot_overlay
+    assert "slot0_partition: partition@d000" in zephyr_data()[KEY_OVERLAY][""]
     assert (
-        extra_build_files["zephyr/child_image/mcuboot/boards/xiao_ble.overlay"].name
-        == "xiao_ble_mcuboot_migrator.overlay"
+        zephyr_data()[KEY_SYSBUILD_CONF]["SB_CONFIG_BOOT_SIGNATURE_TYPE_NONE"] is True
     )
     # The fw2 layout alone does NOT build the one-time migrator installer: the
     # standalone migrator app is not copied into the build and the post-build
     # packaging script is not registered (that is gated behind migrator_image).
     assert "migrator/CMakeLists.txt" not in extra_build_files
     assert "migrator/prj.conf" not in extra_build_files
-    assert (
-        "post:xiao_ble_mcuboot_migrator.py"
-        not in CORE.platformio_options.get("extra_scripts", [])
+    assert "post:xiao_ble_mcuboot_migrator.py" not in CORE.platformio_options.get(
+        "extra_scripts", []
     )
     assert [
         (section.name, section.address, section.size)

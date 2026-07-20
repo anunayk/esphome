@@ -17,6 +17,7 @@ from esphome.components.zephyr import (
     zephyr_add_overlay,
     zephyr_add_pm_static,
     zephyr_add_prj_conf,
+    zephyr_add_sysbuild_conf,
     zephyr_data,
     zephyr_set_core_data,
     zephyr_setup_preferences,
@@ -456,9 +457,31 @@ async def to_code(config: ConfigType) -> None:
         # USB-CDC updater package could not be generated.
         zephyr_add_prj_conf("BOOTLOADER_MCUBOOT", True)
         if config[CONF_BOARD] == "xiao_ble":
+            # slot0_partition / slot1_partition devicetree nodes for the MCUboot
+            # sysbuild image. Under sysbuild, bootloader/mcuboot/boot/zephyr/
+            # CMakeLists.txt reads erase-block-size / write-block-size (and the
+            # auto sector count) from these labels at configure time; the xiao_ble
+            # board DTS ships the Adafruit softdevice layout and defines no such
+            # labels, so we add them here. The real placement is owned by the
+            # Partition Manager static layout (pm_static.yml); these addresses
+            # only match the PM mcuboot_primary/mcuboot_secondary slots so the
+            # configure-time sector maths is correct.
+            mcuboot_slots = ""
             if _mcuboot_usb_cdc_recovery_enabled(config):
                 mcuboot_conf = "xiao_ble_mcuboot_usb_cdc_recovery.conf"
                 mcuboot_overlay = "xiao_ble_mcuboot_usb_cdc_recovery.overlay"
+                # Single-application-slot recovery bootloader: only slot0 is read
+                # by MCUboot. mcuboot_primary fills 0x1000..0x79000 (0x78000).
+                mcuboot_slots = """
+                    &flash0 {
+                        partitions {
+                            slot0_partition: partition@1000 {
+                                label = "image-0";
+                                reg = <0x00001000 0x00078000>;
+                            };
+                        };
+                    };
+                """
                 add_extra_script(
                     "post",
                     "xiao_ble_mcuboot_artifact.py",
@@ -520,6 +543,23 @@ async def to_code(config: ConfigType) -> None:
                 # truth for these addresses).
                 mcuboot_conf = "xiao_ble_mcuboot_migrator.conf"
                 mcuboot_overlay = "xiao_ble_mcuboot_migrator.overlay"
+                # Two-slot swap bootloader: MCUboot reads both slots. The
+                # dynamic mcuboot_primary fills 0xD000..0x80000 (0x73000) and
+                # mcuboot_secondary matches it at 0x80000 (0x73000).
+                mcuboot_slots = """
+                    &flash0 {
+                        partitions {
+                            slot0_partition: partition@d000 {
+                                label = "image-0";
+                                reg = <0x0000d000 0x00073000>;
+                            };
+                            slot1_partition: partition@80000 {
+                                label = "image-1";
+                                reg = <0x00080000 0x00073000>;
+                            };
+                        };
+                    };
+                """
                 if config[CONF_MCUBOOT][CONF_MIGRATOR_IMAGE]:
                     # Producing the one-time fw1 -> fw2 installer image is a
                     # separate, opt-in concern from building the app in the fw2
@@ -569,14 +609,54 @@ async def to_code(config: ConfigType) -> None:
             else:
                 mcuboot_conf = "xiao_ble_mcuboot.conf"
                 mcuboot_overlay = "xiao_ble_mcuboot.overlay"
+                # Default two-slot swap layout (no custom pm_static); give
+                # MCUboot slot labels so the configure-time sector maths works.
+                mcuboot_slots = """
+                    &flash0 {
+                        partitions {
+                            slot0_partition: partition@d000 {
+                                label = "image-0";
+                                reg = <0x0000d000 0x00073000>;
+                            };
+                            slot1_partition: partition@80000 {
+                                label = "image-1";
+                                reg = <0x00080000 0x00073000>;
+                            };
+                        };
+                    };
+                """
+            # Deliver the MCUboot Kconfig fragment and DT overlay to the MCUboot
+            # *sysbuild* image (NCS >= 2.9.2 ignores the old zephyr/child_image/
+            # mechanism). Sysbuild reads these from ${APP_DIR}/sysbuild/, i.e.
+            # zephyr/sysbuild/<image>.{conf,overlay}. The board overlay and the
+            # slot0/slot1 partition nodes are both appended to the same MCUboot
+            # image overlay.
+            # The recovery (fw1) and two-slot (fw2) bootloaders are hash-only
+            # (signature type "none") to fit the tight Adafruit/relocated flash
+            # budget -- see the CONFIG_BOOT_SIGNATURE_TYPE_NONE lines in their
+            # .conf. Under sysbuild the signature type is chosen at the sysbuild
+            # level (the mcuboot image inherits it and the app is signed to
+            # match), and the nRF52840 sysbuild default is ECDSA-P256, which
+            # would override the image-level request and push MCUboot over its
+            # budget. Force it to "none" here so both hold.
+            if _mcuboot_usb_cdc_recovery_enabled(config) or _mcuboot_two_slot_enabled(
+                config
+            ):
+                zephyr_add_sysbuild_conf("BOOT_SIGNATURE_TYPE_NONE", True)
             add_extra_build_file(
-                "zephyr/child_image/mcuboot.conf",
+                "zephyr/sysbuild/mcuboot.conf",
                 Path(__file__).parent / mcuboot_conf,
             )
-            add_extra_build_file(
-                "zephyr/child_image/mcuboot/boards/xiao_ble.overlay",
-                Path(__file__).parent / mcuboot_overlay,
+            zephyr_add_overlay(
+                (Path(__file__).parent / mcuboot_overlay).read_text(), image="mcuboot"
             )
+            if mcuboot_slots:
+                zephyr_add_overlay(mcuboot_slots, image="mcuboot")
+                # The application image also needs the slot0/slot1 labels: NCS's
+                # sysbuild image-signing step (image_signing.cmake) reads
+                # slot0_partition (REQUIRED) to size the signed app image. Add
+                # the same nodes to the app's own devicetree overlay.
+                zephyr_add_overlay(mcuboot_slots, image="")
     elif "_sd" in config[KEY_BOOTLOADER]:
         bootloader = config[KEY_BOOTLOADER].split("_")
         sd_id = bootloader[2][2:]
