@@ -907,15 +907,25 @@ def process_stacktrace(config: ConfigType, line: str, backtrace_state: bool) -> 
     return False
 
 
-def _generate_cmake_lists() -> bool:
-    """Write the project CMakeLists.txt, returning True if it changed."""
+def _generate_cmake_lists() -> tuple[bool, list[Path]]:
+    """Write the project CMakeLists.txt.
+
+    Returns ``(changed, module_dirs)`` where ``changed`` is True if the file
+    changed on disk and ``module_dirs`` is the list of Zephyr module directories
+    converted from ``cg.add_library()`` libraries. The caller wires ``module_dirs``
+    into the build via the environment (see ``run_compile``) rather than a plain
+    ``set(EXTRA_ZEPHYR_MODULES ...)`` here: Zephyr resolves the module list with
+    ``zephyr_get()``, which returns the first *scope* that defines the variable and
+    never merges across scopes, so a local ``set()`` in this CMakeLists is silently
+    dropped whenever a higher-priority scope already supplies modules (an external
+    ``ZEPHYR_EXTRA_MODULES`` in the environment, or -- under sysbuild -- the module
+    list the sysbuild top level pushes into every image).
+    """
     compile_flags = get_project_compile_flags()
     link_flags = get_project_link_flags()
 
     # Convert any PlatformIO libraries added via cg.add_library() into Zephyr
-    # modules and discover them through EXTRA_ZEPHYR_MODULES (a CMake list, set
-    # before find_package(Zephyr) so the modules are picked up). Only
-    # framework-agnostic libraries actually compile under Zephyr.
+    # modules. Only framework-agnostic libraries actually compile under Zephyr.
     from esphome.components.zephyr.library import generate_zephyr_modules
 
     module_dirs = generate_zephyr_modules(list(CORE.platformio_libraries.values()))
@@ -925,13 +935,6 @@ def _generate_cmake_lists() -> bool:
         "",
         'set(Zephyr_DIR "$ENV{ZEPHYR_BASE}/share/zephyr-package/cmake/")',
         "",
-    ]
-
-    if module_dirs:
-        modules = ";".join(str(d).replace("\\", "/") for d in module_dirs)
-        lines += [f'set(EXTRA_ZEPHYR_MODULES "{modules}")', ""]
-
-    lines += [
         "find_package(Zephyr REQUIRED)",
         "",
         f"project({CORE.name})",
@@ -958,10 +961,42 @@ def _generate_cmake_lists() -> bool:
             ")",
         ]
 
-    return write_file_if_changed(
+    changed = write_file_if_changed(
         CORE.relative_build_path("zephyr", "CMakeLists.txt"),
         "\n".join(lines) + "\n",
     )
+    return changed, module_dirs
+
+
+def _merge_zephyr_extra_modules(env: dict, module_dirs: list[Path]) -> None:
+    """Publish converted-library module dirs to the Zephyr build environment.
+
+    Zephyr's ``zephyr_get()`` resolves the module list (``EXTRA_ZEPHYR_MODULES`` /
+    ``ZEPHYR_EXTRA_MODULES``) by returning the first scope that defines it without
+    merging across scopes. A local ``set()`` in the app CMakeLists therefore loses
+    to any value provided at a higher-priority scope -- an external
+    ``ZEPHYR_EXTRA_MODULES`` in the environment (e.g. a link-only prebuilt-archive
+    module), or, under sysbuild, the module list the sysbuild top level reads once
+    and pushes into every image. Merge our module dirs into those same environment
+    variables (preserving anything already there) so every converted library
+    survives in both sysbuild and non-sysbuild builds. Setting both aliases to the
+    identical merged value keeps whichever name ``zephyr_get()`` happens to pick
+    complete.
+    """
+    if not module_dirs:
+        return
+    merged: list[str] = []
+    for name in ("EXTRA_ZEPHYR_MODULES", "ZEPHYR_EXTRA_MODULES"):
+        for path in env.get(name, "").split(";"):
+            if path and path not in merged:
+                merged.append(path)
+    for module_dir in module_dirs:
+        path = str(module_dir).replace("\\", "/")
+        if path and path not in merged:
+            merged.append(path)
+    value = ";".join(merged)
+    env["EXTRA_ZEPHYR_MODULES"] = value
+    env["ZEPHYR_EXTRA_MODULES"] = value
 
 
 def _copy_if_exists(src: Path, dst: Path) -> None:
@@ -986,7 +1021,8 @@ def run_compile(args, config: ConfigType) -> bool:
     paths = get_build_paths()
     env = get_build_env()
 
-    cmake_lists_changed = _generate_cmake_lists()
+    cmake_lists_changed, module_dirs = _generate_cmake_lists()
+    _merge_zephyr_extra_modules(env, module_dirs)
 
     board = zephyr_data()[KEY_BOARD]
     build_dir = CORE.relative_pioenvs_path(CORE.name)
