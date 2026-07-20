@@ -1287,8 +1287,8 @@ def _pch_usable() -> bool:
     return pch.pch_usable((toolchain_tool("g++"),))
 
 
-def _generate_cmake_lists(pch_on: bool) -> bool:
-    """Write the project CMakeLists.txt, returning True if it changed."""
+def _generate_cmake_lists(pch_on: bool) -> tuple[bool, list[Path]]:
+    """Write CMakeLists.txt and return its change flag and library module paths."""
     entries = lex_cmake_build_flags("nRF52")
     compile_flags = get_cmake_compile_flags(entries)
     link_flags = get_cmake_link_flags(entries)
@@ -1311,8 +1311,6 @@ def _generate_cmake_lists(pch_on: bool) -> bool:
     ]
 
     if module_dirs:
-        modules = ";".join(str(d).replace("\\", "/") for d in module_dirs)
-        lines += [f'set(EXTRA_ZEPHYR_MODULES "{modules}")', ""]
         if defines:
             escaped = ";".join(cmake_escape(flag) for flag in defines)
             lines += [f'set({DEFINES_VAR} "{escaped}")', ""]
@@ -1356,10 +1354,42 @@ def _generate_cmake_lists(pch_on: bool) -> bool:
             ")",
         ]
 
-    return write_file_if_changed(
+    changed = write_file_if_changed(
         CORE.relative_build_path("zephyr", "CMakeLists.txt"),
         "\n".join(lines) + "\n",
     )
+    return changed, module_dirs
+
+
+def _merge_zephyr_extra_modules(env: dict, module_dirs: list[Path]) -> None:
+    """Publish converted-library module dirs to the Zephyr build environment.
+
+    Zephyr's ``zephyr_get()`` resolves the module list (``EXTRA_ZEPHYR_MODULES`` /
+    ``ZEPHYR_EXTRA_MODULES``) by returning the first scope that defines it without
+    merging across scopes. A local ``set()`` in the app CMakeLists therefore loses
+    to any value provided at a higher-priority scope -- an external
+    ``ZEPHYR_EXTRA_MODULES`` in the environment (e.g. a link-only prebuilt-archive
+    module), or, under sysbuild, the module list the sysbuild top level reads once
+    and pushes into every image. Merge our module dirs into those same environment
+    variables (preserving anything already there) so every converted library
+    survives in both sysbuild and non-sysbuild builds. Setting both aliases to the
+    identical merged value keeps whichever name ``zephyr_get()`` happens to pick
+    complete.
+    """
+    if not module_dirs:
+        return
+    merged: list[str] = []
+    for name in ("EXTRA_ZEPHYR_MODULES", "ZEPHYR_EXTRA_MODULES"):
+        for path in env.get(name, "").split(";"):
+            if path and path not in merged:
+                merged.append(path)
+    for module_dir in module_dirs:
+        path = str(module_dir).replace("\\", "/")
+        if path and path not in merged:
+            merged.append(path)
+    value = ";".join(merged)
+    env["EXTRA_ZEPHYR_MODULES"] = value
+    env["ZEPHYR_EXTRA_MODULES"] = value
 
 
 def _copy_if_exists(src: Path, dst: Path) -> None:
@@ -1476,7 +1506,8 @@ def run_compile(args, config: ConfigType) -> bool:
     env = get_build_env(ccache)
 
     pch_on = _pch_usable()
-    cmake_lists_changed = _generate_cmake_lists(pch_on)
+    cmake_lists_changed, module_dirs = _generate_cmake_lists(pch_on)
+    _merge_zephyr_extra_modules(env, module_dirs)
 
     board = zephyr_data()[KEY_BOARD]
     build_dir = CORE.relative_pioenvs_path(CORE.name)
