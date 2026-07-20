@@ -33,7 +33,11 @@ def is_ble_address(value: str) -> bool:
 
 def _name_matches(device: BLEDevice, adv: AdvertisementData, name: str) -> bool:
     # device.name can be a stale cached name on macOS; adv.local_name is what is on the air now
-    return name in (device.name, adv.local_name)
+    return any(
+        candidate is not None
+        and (candidate == name or candidate.startswith(f"{name}-"))
+        for candidate in (device.name, adv.local_name)
+    )
 
 
 async def find_device_by_name(name: str, timeout: float = 10.0) -> BLEDevice | None:
