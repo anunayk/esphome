@@ -78,8 +78,24 @@ void CaptivePortal::setup() {
 }
 void CaptivePortal::start() {
   this->base_->init();
+
+  // Register our handler as a FALLBACK, tried only after the web_server's own
+  // routes. The registration is deferred by one loop iteration on purpose: on a
+  // blank device the fallback AP is raised from wifi's setup() (setup_priority
+  // WIFI), so this start() runs BEFORE web_server's setup() (WIFI - 1). Adding the
+  // handler synchronously here would place it AHEAD of web_server in the dispatch
+  // list, and canHandle() below (which greedily claims every GET while active)
+  // would then shadow "/" and every other route — hiding a device's custom
+  // web_server frontend behind the captive page for the whole provisioning
+  // session. Deferring lets web_server register its routes first, so our handler
+  // lands last and only catches URLs nothing else serves (OS captive-detection
+  // probes, /config.json, /wifisave). On an already-running device (STA-failed
+  // fallback AP) web_server is up long before this runs, so the deferral is just a
+  // harmless one-tick delay. Guarded so repeated start()/end() cycles register
+  // exactly once.
   if (!this->initialized_) {
-    this->base_->add_handler_without_auth(this);
+    this->initialized_ = true;
+    this->defer([this]() { this->base_->add_handler_without_auth(this); });
   }
 
   network::IPAddress ip = wifi::global_wifi_component->wifi_soft_ap_ip();
@@ -94,7 +110,6 @@ void CaptivePortal::start() {
   this->dns_server_->start(53, ESPHOME_F("*"), ip);
 #endif
 
-  this->initialized_ = true;
   this->active_ = true;
 
   // Enable loop() now that captive portal is active
