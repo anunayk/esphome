@@ -381,18 +381,30 @@ async def to_code(config: ConfigType) -> None:
             # Manager owns the real placement (no pm_static); these addresses
             # only need to match PM's mcuboot_primary/mcuboot_secondary so the
             # configure-time sector maths is correct.
+            #
+            # Pin the settings partition. PM sizes the two application slots
+            # first and hands settings whatever is left, which on this 1 MB part
+            # is a single 0x2000 leftover -- barely the two sectors Zephyr NVS
+            # needs, and a 5x cut from what the firmware was written against.
+            # Fixing the size makes the whole layout deterministic:
+            #   mcuboot   0x00000..0x0C000   (0xC000)
+            #   primary   0x0C000..0x81000   (0x75000)
+            #   secondary 0x81000..0xF6000   (0x75000)
+            #   settings  0xF6000..0x100000  (0xA000)
+            # 0xA000 is chosen so both slots land on a 4 KiB boundary.
+            zephyr_add_prj_conf("PM_PARTITION_SIZE_SETTINGS_STORAGE", 0xA000)
             mcuboot_conf = "xiao_ble_mcuboot.conf"
             mcuboot_overlay = "xiao_ble_mcuboot.overlay"
             mcuboot_slots = """
                 &flash0 {
                     partitions {
-                        slot0_partition: partition@d000 {
+                        slot0_partition: partition@c000 {
                             label = "image-0";
-                            reg = <0x0000d000 0x00073000>;
+                            reg = <0x0000c000 0x00075000>;
                         };
-                        slot1_partition: partition@80000 {
+                        slot1_partition: partition@81000 {
                             label = "image-1";
-                            reg = <0x00080000 0x00073000>;
+                            reg = <0x00081000 0x00075000>;
                         };
                     };
                 };
@@ -410,6 +422,17 @@ async def to_code(config: ConfigType) -> None:
             # would override any image-level request and push MCUboot over
             # budget. Force it to "none" here.
             zephyr_add_sysbuild_conf("BOOT_SIGNATURE_TYPE_NONE", True)
+            # Overwrite-only upgrades: no swap, no revert, no trailer state, so a
+            # board cannot get stuck re-running a revert (the MCUboot v2.1.0
+            # defect fixed only in v2.2.0). The trade is no automatic rollback.
+            #
+            # This MUST be set at the sysbuild level. The upgrade mode is a
+            # Kconfig *choice*, and BOOTLOADER_image_default.cmake force-sets
+            # every member of that choice from SB_CONFIG_MCUBOOT_MODE_* into the
+            # image's FORCED_CONF_FILE -- so CONFIG_BOOT_UPGRADE_ONLY=y in the
+            # image's own fragment is silently overridden back to n, exactly as
+            # for the signature type above.
+            zephyr_add_sysbuild_conf("MCUBOOT_MODE_OVERWRITE_ONLY", True)
             add_extra_build_file(
                 "zephyr/sysbuild/mcuboot.conf",
                 Path(__file__).parent / mcuboot_conf,
