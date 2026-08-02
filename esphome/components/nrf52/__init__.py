@@ -10,7 +10,6 @@ import subprocess
 from esphome import pins
 import esphome.codegen as cg
 from esphome.components.zephyr import (
-    Section,
     add_extra_build_file,
     add_extra_script,
     copy_files as zephyr_copy_files,
@@ -40,7 +39,6 @@ from esphome.const import (
     CONF_FRAMEWORK,
     CONF_ID,
     CONF_OTA,
-    CONF_PLATFORM,
     CONF_RESET_PIN,
     CONF_SAFE_MODE,
     CONF_TOOLCHAIN,
@@ -210,12 +208,8 @@ DeviceFirmwareUpdate = nrf52_ns.class_("DeviceFirmwareUpdate", cg.Component)
 CONF_DFU = "dfu"
 CONF_DCDC = "dcdc"
 CONF_LIBC_NANO = "libc_nano"
-CONF_MCUBOOT = "mcuboot"
 CONF_REG0 = "reg0"
 CONF_UICR_ERASE = "uicr_erase"
-CONF_USB_CDC_RECOVERY = "usb_cdc_recovery"
-CONF_TWO_SLOT = "two_slot"
-CONF_MIGRATOR_IMAGE = "migrator_image"
 
 VOLTAGE_LEVELS = [1.8, 2.1, 2.4, 2.7, 3.0, 3.3]
 
@@ -236,77 +230,6 @@ def _dfu_schema(value: bool | ConfigType) -> ConfigType:
     return _DFU_SCHEMA(value)
 
 
-def _validate_mcuboot(config: ConfigType) -> ConfigType:
-    if CONF_MCUBOOT not in config:
-        return config
-    if config[KEY_BOOTLOADER] != BOOTLOADER_MCUBOOT:
-        raise cv.Invalid("mcuboot: is only valid with bootloader: mcuboot")
-    if config[CONF_MCUBOOT][CONF_USB_CDC_RECOVERY] and config[CONF_BOARD] != "xiao_ble":
-        raise cv.Invalid("mcuboot.usb_cdc_recovery is only supported on xiao_ble")
-    if config[CONF_MCUBOOT][CONF_TWO_SLOT] and config[CONF_BOARD] != "xiao_ble":
-        raise cv.Invalid("mcuboot.two_slot is only supported on xiao_ble")
-    if (
-        config[CONF_MCUBOOT][CONF_TWO_SLOT]
-        and config[CONF_MCUBOOT][CONF_USB_CDC_RECOVERY]
-    ):
-        # usb_cdc_recovery is the single-slot fw1 bootloader; two_slot builds the
-        # relocated two-slot fw2 that fw1 is migrated *to*. They are different
-        # flash layouts and cannot be built into one image.
-        raise cv.Invalid(
-            "mcuboot.two_slot and mcuboot.usb_cdc_recovery are mutually "
-            "exclusive: usb_cdc_recovery builds the single-slot fw1 bootloader, "
-            "two_slot builds the relocated two-slot fw2 that fw1 migrates to."
-        )
-    if (
-        config[CONF_MCUBOOT][CONF_MIGRATOR_IMAGE]
-        and not config[CONF_MCUBOOT][CONF_TWO_SLOT]
-    ):
-        # two_slot builds the app in the fw2 two-slot layout; migrator_image is
-        # the one-time fw1 -> fw2 installer that embeds *this build's* relocated
-        # fw2 bootloader, so it can only be produced from a two_slot build.
-        raise cv.Invalid(
-            "mcuboot.migrator_image requires mcuboot.two_slot: the installer "
-            "image embeds the relocated fw2 bootloader that the two_slot layout "
-            "produces."
-        )
-    return config
-
-
-def _mcuboot_usb_cdc_recovery_enabled(config: ConfigType) -> bool:
-    mcuboot_config = config.get(CONF_MCUBOOT, {})
-    return mcuboot_config.get(CONF_USB_CDC_RECOVERY, False)
-
-
-def _mcuboot_two_slot_enabled(config: ConfigType) -> bool:
-    mcuboot_config = config.get(CONF_MCUBOOT, {})
-    return mcuboot_config.get(CONF_TWO_SLOT, False)
-
-
-def _validate_usb_cdc_recovery_ota(config: ConfigType, full_config: ConfigType) -> None:
-    """Reject usb_cdc_recovery combined with a runtime zephyr_mcumgr OTA.
-
-    usb_cdc_recovery builds a single-application-slot MCUboot
-    (CONFIG_SINGLE_APPLICATION_SLOT=y) that only updates through its own
-    USB-CDC serial recovery mode. It has no secondary slot and never swaps, so
-    a zephyr_mcumgr OTA (e.g. over BLE) silently writes an image into a slot the
-    bootloader ignores: the upload "succeeds" but the device keeps booting the
-    old firmware. These two cannot coexist, so fail loudly instead.
-    """
-    if not _mcuboot_usb_cdc_recovery_enabled(config):
-        return
-    for ota_conf in full_config.get(CONF_OTA, []):
-        if ota_conf.get(CONF_PLATFORM) == "zephyr_mcumgr":
-            raise cv.Invalid(
-                "mcuboot.usb_cdc_recovery builds a single-slot MCUboot that has no "
-                "secondary slot and can only be updated through its USB-CDC serial "
-                "recovery mode. A 'zephyr_mcumgr' OTA (e.g. over BLE) would upload "
-                "an image the bootloader never swaps in, so the device keeps "
-                "booting the old firmware. Remove 'usb_cdc_recovery: true' to build "
-                "the two-slot swap bootloader that supports OTA, or drop the 'ota:' "
-                "block and update via USB-CDC serial recovery."
-            )
-
-
 CONFIG_SCHEMA = cv.All(
     _detect_bootloader,
     set_core_data,
@@ -317,13 +240,6 @@ CONFIG_SCHEMA = cv.All(
             ),
             cv.Optional(KEY_BOOTLOADER): cv.one_of(*BOOTLOADERS, lower=True),
             cv.Optional(CONF_DFU): _dfu_schema,
-            cv.Optional(CONF_MCUBOOT): cv.Schema(
-                {
-                    cv.Optional(CONF_USB_CDC_RECOVERY, default=False): cv.boolean,
-                    cv.Optional(CONF_TWO_SLOT, default=False): cv.boolean,
-                    cv.Optional(CONF_MIGRATOR_IMAGE, default=False): cv.boolean,
-                }
-            ),
             cv.Optional(CONF_DCDC): cv.boolean,
             cv.Optional(CONF_REG0): cv.Schema(
                 {
@@ -357,7 +273,6 @@ CONFIG_SCHEMA = cv.All(
         }
     ),
     _resolve_toolchain,
-    _validate_mcuboot,
     set_framework,
 )
 
@@ -377,7 +292,6 @@ def _final_validate(config):
             "Selected generic Adafruit bootloader. The board might crash. Consider settings `bootloader:`"
         )
     full_config = fv.full_config.get()
-    _validate_usb_cdc_recovery_ota(config, full_config)
     conf = config[CONF_FRAMEWORK]
     advanced = conf[CONF_ADVANCED]
 
@@ -451,10 +365,9 @@ async def to_code(config: ConfigType) -> None:
         # Build the app as an MCUboot image (signed, linked into the primary
         # slot) and pull in the MCUboot child image + merged.hex. This must be
         # set by the bootloader selection itself, not by the OTA component: a
-        # usb_cdc_recovery fw1 config has no zephyr_mcumgr OTA (the two are
-        # mutually exclusive), and without this the app would link as a plain
-        # SoftDevice app at 0x27000, MCUboot would never build, and the
-        # USB-CDC updater package could not be generated.
+        # config with no zephyr_mcumgr OTA still needs it, and without it the app
+        # would link as a plain SoftDevice app at 0x27000 and MCUboot would never
+        # build.
         zephyr_add_prj_conf("BOOTLOADER_MCUBOOT", True)
         if config[CONF_BOARD] == "xiao_ble":
             # slot0_partition / slot1_partition devicetree nodes for the MCUboot
@@ -462,187 +375,41 @@ async def to_code(config: ConfigType) -> None:
             # CMakeLists.txt reads erase-block-size / write-block-size (and the
             # auto sector count) from these labels at configure time; the xiao_ble
             # board DTS ships the Adafruit softdevice layout and defines no such
-            # labels, so we add them here. The real placement is owned by the
-            # Partition Manager static layout (pm_static.yml); these addresses
-            # only match the PM mcuboot_primary/mcuboot_secondary slots so the
+            # labels, so we add them here.
+            #
+            # MCUboot boots from the reset vector at 0x0 and the Partition
+            # Manager owns the real placement (no pm_static); these addresses
+            # only need to match PM's mcuboot_primary/mcuboot_secondary so the
             # configure-time sector maths is correct.
-            mcuboot_slots = ""
-            if _mcuboot_usb_cdc_recovery_enabled(config):
-                mcuboot_conf = "xiao_ble_mcuboot_usb_cdc_recovery.conf"
-                mcuboot_overlay = "xiao_ble_mcuboot_usb_cdc_recovery.overlay"
-                # Single-application-slot recovery bootloader: only slot0 is read
-                # by MCUboot. mcuboot_primary fills 0x1000..0x79000 (0x78000).
-                mcuboot_slots = """
-                    &flash0 {
-                        partitions {
-                            slot0_partition: partition@1000 {
-                                label = "image-0";
-                                reg = <0x00001000 0x00078000>;
-                            };
+            mcuboot_conf = "xiao_ble_mcuboot.conf"
+            mcuboot_overlay = "xiao_ble_mcuboot.overlay"
+            mcuboot_slots = """
+                &flash0 {
+                    partitions {
+                        slot0_partition: partition@d000 {
+                            label = "image-0";
+                            reg = <0x0000d000 0x00073000>;
+                        };
+                        slot1_partition: partition@80000 {
+                            label = "image-1";
+                            reg = <0x00080000 0x00073000>;
                         };
                     };
-                """
-                add_extra_script(
-                    "post",
-                    "xiao_ble_mcuboot_artifact.py",
-                    Path(__file__).parent / "xiao_ble_mcuboot_artifact.py.script",
-                )
-                # MCUboot must fit the executable region in the stock
-                # Adafruit bootloader flash map. 0xFD800..0xFDFFF is the
-                # Adafruit bootloader config page and 0xFE000..0xFEFFF is
-                # the MBR params page used during the bootloader swap; keep
-                # both free so a failed update cannot corrupt swap state.
-                #
-                # Reserve the nRF MBR at 0x0 (0x1000 bytes). The board reaches
-                # MCUboot (at 0xF4000) via this MBR + UICR.NRFFW[0]=0xF4000, so
-                # the application slot must NOT start at 0x0: if it does, the
-                # partition manager places mcuboot_primary over the MBR, MCUboot
-                # reads the MBR as a bogus primary image, and the first app
-                # upload overwrites the MBR -- bricking the boot path (no way
-                # back to MCUboot without SWD). With the MBR reserved here,
-                # mcuboot_primary auto-fills 0x1000..0x79000 (0x78000);
-                # mcuboot_secondary is sized to match (MCUboot requires equal
-                # primary/secondary slots), which shifts settings_storage to
-                # 0xF1000..0xF4000. The mcuboot / config / mbr-params / settings
-                # pages below are unchanged.
-                zephyr_add_pm_static(
-                    [
-                        Section("mbr", 0x0, 0x1000, "flash_primary"),
-                        Section("mcuboot_secondary", 0x79000, 0x78000, "flash_primary"),
-                        Section("settings_storage", 0xF1000, 0x3000, "flash_primary"),
-                        Section("mcuboot", 0xF4000, 0x9800, "flash_primary"),
-                        Section(
-                            "empty_adafruit_bl_config_page",
-                            0xFD800,
-                            0x800,
-                            "flash_primary",
-                        ),
-                        Section(
-                            "empty_mbr_params_page", 0xFE000, 0x1000, "flash_primary"
-                        ),
-                        Section(
-                            "empty_adafruit_bl_settings_page",
-                            0xFF000,
-                            0x1000,
-                            "flash_primary",
-                        ),
-                    ]
-                )
-            elif _mcuboot_two_slot_enabled(config):
-                # Option B fw2: the relocated two-slot swap MCUboot that fw1 is
-                # migrated to over USB (no SWD). This is the steady-state layout
-                # every normal build of the running app uses. The factory nRF MBR
-                # stays at 0x0; MCUboot is relocated to 0x1000 and reached via
-                # UICR.NRFFW[0]=0x1000, which the migrator app commits at
-                # migration time. mcuboot_primary auto-fills the gap
-                # 0xD000..0x80000 between the relocated bootloader and the
-                # equal-sized secondary slot. Producing the one-time fw1 -> fw2
-                # installer that embeds this relocated bootloader is a separate
-                # opt-in below (migrator_image). See BOOTLOADER_UPDATER_PLAN.md
-                # (Option B) and migrator/migrator_layout.h (the shared source of
-                # truth for these addresses).
-                mcuboot_conf = "xiao_ble_mcuboot_migrator.conf"
-                mcuboot_overlay = "xiao_ble_mcuboot_migrator.overlay"
-                # Two-slot swap bootloader: MCUboot reads both slots. The
-                # dynamic mcuboot_primary fills 0xD000..0x80000 (0x73000) and
-                # mcuboot_secondary matches it at 0x80000 (0x73000).
-                mcuboot_slots = """
-                    &flash0 {
-                        partitions {
-                            slot0_partition: partition@d000 {
-                                label = "image-0";
-                                reg = <0x0000d000 0x00073000>;
-                            };
-                            slot1_partition: partition@80000 {
-                                label = "image-1";
-                                reg = <0x00080000 0x00073000>;
-                            };
-                        };
-                    };
-                """
-                if config[CONF_MCUBOOT][CONF_MIGRATOR_IMAGE]:
-                    # Producing the one-time fw1 -> fw2 installer image is a
-                    # separate, opt-in concern from building the app in the fw2
-                    # layout above. It compiles a standalone migrator Zephyr app
-                    # (its own west build) and is only needed once, to flash the
-                    # two-slot bootloader onto a board still running fw1; every
-                    # normal build/flash/OTA of the running app needs only the
-                    # fw2 layout. Gating it here keeps that orthogonal west build
-                    # out of the normal build path. See migrator/README.md.
-                    add_extra_script(
-                        "post",
-                        "xiao_ble_mcuboot_migrator.py",
-                        Path(__file__).parent / "xiao_ble_mcuboot_migrator.py.script",
-                    )
-                    # The post-build script runs in a separate PlatformIO/SCons
-                    # process with no access to the component source tree, so
-                    # copy the whole standalone migrator Zephyr app into the
-                    # build's project dir under migrator/. The post-build step
-                    # compiles it from source (west build) to produce the
-                    # unsigned base image, then injects this build's relocated
-                    # fw2 bootloader blob and signs it -- so no prebuilt binary
-                    # is committed in-tree.
-                    migrator_dir = Path(__file__).parent / "migrator"
-                    for src in sorted(migrator_dir.rglob("*")):
-                        if not src.is_file():
-                            continue
-                        rel = src.relative_to(migrator_dir)
-                        # README is docs only; nothing else is excluded.
-                        if rel.parts[0] == "README.md":
-                            continue
-                        add_extra_build_file(f"migrator/{rel.as_posix()}", src)
-                # The Nordic Partition Manager requires the static layout to
-                # leave exactly one gap (for the dynamic mcuboot_primary/app at
-                # 0xD000..0x80000). The reserved top region above settings holds
-                # the factory MBR-params page (UICR.NRFFW[1]=0xFE000) and the
-                # Adafruit bootloader pages, which Option B preserves -- it must
-                # be declared statically too, or the PM sees two gaps and fails.
-                zephyr_add_pm_static(
-                    [
-                        Section("mbr", 0x0, 0x1000, "flash_primary"),
-                        Section("mcuboot", 0x1000, 0xC000, "flash_primary"),
-                        Section("mcuboot_secondary", 0x80000, 0x73000, "flash_primary"),
-                        Section("settings_storage", 0xF3000, 0xA800, "flash_primary"),
-                        Section("mbr_params", 0xFD800, 0x2800, "flash_primary"),
-                    ]
-                )
-            else:
-                mcuboot_conf = "xiao_ble_mcuboot.conf"
-                mcuboot_overlay = "xiao_ble_mcuboot.overlay"
-                # Default two-slot swap layout (no custom pm_static); give
-                # MCUboot slot labels so the configure-time sector maths works.
-                mcuboot_slots = """
-                    &flash0 {
-                        partitions {
-                            slot0_partition: partition@d000 {
-                                label = "image-0";
-                                reg = <0x0000d000 0x00073000>;
-                            };
-                            slot1_partition: partition@80000 {
-                                label = "image-1";
-                                reg = <0x00080000 0x00073000>;
-                            };
-                        };
-                    };
-                """
+                };
+            """
             # Deliver the MCUboot Kconfig fragment and DT overlay to the MCUboot
             # *sysbuild* image (NCS >= 2.9.2 ignores the old zephyr/child_image/
             # mechanism). Sysbuild reads these from ${APP_DIR}/sysbuild/, i.e.
             # zephyr/sysbuild/<image>.{conf,overlay}. The board overlay and the
             # slot0/slot1 partition nodes are both appended to the same MCUboot
             # image overlay.
-            # The recovery (fw1) and two-slot (fw2) bootloaders are hash-only
-            # (signature type "none") to fit the tight Adafruit/relocated flash
-            # budget -- see the CONFIG_BOOT_SIGNATURE_TYPE_NONE lines in their
-            # .conf. Under sysbuild the signature type is chosen at the sysbuild
-            # level (the mcuboot image inherits it and the app is signed to
-            # match), and the nRF52840 sysbuild default is ECDSA-P256, which
-            # would override the image-level request and push MCUboot over its
-            # budget. Force it to "none" here so both hold.
-            if _mcuboot_usb_cdc_recovery_enabled(config) or _mcuboot_two_slot_enabled(
-                config
-            ):
-                zephyr_add_sysbuild_conf("BOOT_SIGNATURE_TYPE_NONE", True)
+            # MCUboot is hash-only (signature type "none") to fit its flash
+            # budget. Under sysbuild the signature type is chosen at the sysbuild
+            # level -- the mcuboot image inherits it and the app is signed to
+            # match -- and the nRF52840 sysbuild default is ECDSA-P256, which
+            # would override any image-level request and push MCUboot over
+            # budget. Force it to "none" here.
+            zephyr_add_sysbuild_conf("BOOT_SIGNATURE_TYPE_NONE", True)
             add_extra_build_file(
                 "zephyr/sysbuild/mcuboot.conf",
                 Path(__file__).parent / mcuboot_conf,
@@ -650,13 +417,12 @@ async def to_code(config: ConfigType) -> None:
             zephyr_add_overlay(
                 (Path(__file__).parent / mcuboot_overlay).read_text(), image="mcuboot"
             )
-            if mcuboot_slots:
-                zephyr_add_overlay(mcuboot_slots, image="mcuboot")
-                # The application image also needs the slot0/slot1 labels: NCS's
-                # sysbuild image-signing step (image_signing.cmake) reads
-                # slot0_partition (REQUIRED) to size the signed app image. Add
-                # the same nodes to the app's own devicetree overlay.
-                zephyr_add_overlay(mcuboot_slots, image="")
+            zephyr_add_overlay(mcuboot_slots, image="mcuboot")
+            # The application image also needs the slot0/slot1 labels: NCS's
+            # sysbuild image-signing step (image_signing.cmake) reads
+            # slot0_partition (REQUIRED) to size the signed app image. Add the
+            # same nodes to the app's own devicetree overlay.
+            zephyr_add_overlay(mcuboot_slots, image="")
     elif "_sd" in config[KEY_BOOTLOADER]:
         bootloader = config[KEY_BOOTLOADER].split("_")
         sd_id = bootloader[2][2:]
@@ -784,8 +550,6 @@ def get_download_types(storage_json: StorageJSON) -> list[dict[str, str]]:
     HEX_PATH = "zephyr/zephyr.hex"  # SDK 2.6.1, only generated when OTA is disabled
     HEX_MERGED_PATH = "zephyr/merged.hex"  # SDK 2.9.2, always generated
     APP_IMAGE_PATH = "zephyr/app_update.bin"
-    MCUBOOT_UPDATER_DFU_PATH = "zephyr/xiao_ble_mcuboot_updater_dfu.zip"
-    MCUBOOT_MIGRATOR_PATH = "zephyr/xiao_ble_mcuboot_migrator.img"
     build_dir = Path(storage_json.firmware_bin_path).parent
     if (build_dir / APP_IMAGE_PATH).is_file():
         types = [
@@ -806,29 +570,6 @@ def get_download_types(storage_json: StorageJSON) -> list[dict[str, str]]:
                 "download": f"app-{storage_json.name}.img",
             },
         ]
-        if (build_dir / MCUBOOT_UPDATER_DFU_PATH).is_file():
-            types.append(
-                {
-                    "title": "MCUboot bootloader update package",
-                    "description": "One-time MCUboot install through the stock "
-                    "Adafruit bootloader via adafruit-nrfutil using USB CDC. "
-                    "No SWD debugger needed.",
-                    "file": MCUBOOT_UPDATER_DFU_PATH,
-                    "download": f"mcuboot-updater-{storage_json.name}.zip",
-                }
-            )
-        if (build_dir / MCUBOOT_MIGRATOR_PATH).is_file():
-            types.append(
-                {
-                    "title": "MCUboot two-slot migrator (no SWD)",
-                    "description": "One-time fw1 -> fw2 migration. Upload to the "
-                    "single-slot usb_cdc_recovery bootloader via USB-CDC serial "
-                    "recovery, then physically reset: it installs this two-slot "
-                    "swap MCUboot in place. No SWD debugger needed.",
-                    "file": MCUBOOT_MIGRATOR_PATH,
-                    "download": f"mcuboot-migrator-{storage_json.name}.img",
-                }
-            )
     elif (build_dir / UF2_PATH).is_file():
         types = [
             {

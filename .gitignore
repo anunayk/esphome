@@ -102,10 +102,6 @@ venv-*/
 !.vscode/tasks.json
 CMakeListsPrivate.txt
 CMakeLists.txt
-# The nrf52 migrator ships a real, source-controlled Zephyr app CMakeLists
-# (the ESPHome build compiles it to produce the migrator base image).
-!esphome/components/nrf52/migrator/CMakeLists.txt
-
 # User-specific stuff:
 .idea/**/workspace.xml
 .idea/**/tasks.xml

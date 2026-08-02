@@ -241,12 +241,11 @@ async def _smpmgr_upload_connected(
     r = await smp_client.request(ImageStatesWrite(hash=image_tlv_sha256), 1.0)
 
     if error(r):
-        # MCUboot serial recovery does not implement "set image state"
-        # (test/confirm/swap) and returns ENOTSUP -- this is true for BOTH the
-        # single-slot usb_cdc_recovery (fw1) bootloader AND the two-slot fw2
-        # bootloader's recovery mode, so it is NOT a fw1-vs-fw2 indicator. The
-        # image is already written to the primary slot and boots directly on
-        # reset, so ENOTSUP here is expected, not fatal.
+        # MCUboot serial recovery only implements "set image state" when it is
+        # built with CONFIG_BOOT_SERIAL_IMG_GRP_IMAGE_STATE; without it the
+        # bootloader returns ENOTSUP. The image is already written to the
+        # primary slot and boots directly on reset, so ENOTSUP here is expected,
+        # not fatal.
         if getattr(r, "rc", None) == MGMT_ERR.ENOTSUP:
             _LOGGER.info(
                 "Set-image-state not supported in MCUboot serial recovery; "
