@@ -10,6 +10,7 @@ import subprocess
 from esphome import pins
 import esphome.codegen as cg
 from esphome.components.zephyr import (
+    Section,
     add_extra_build_file,
     add_extra_script,
     copy_files as zephyr_copy_files,
@@ -382,17 +383,27 @@ async def to_code(config: ConfigType) -> None:
             # only need to match PM's mcuboot_primary/mcuboot_secondary so the
             # configure-time sector maths is correct.
             #
-            # Pin the settings partition. PM sizes the two application slots
-            # first and hands settings whatever is left, which on this 1 MB part
-            # is a single 0x2000 leftover -- barely the two sectors Zephyr NVS
-            # needs, and a 5x cut from what the firmware was written against.
-            # Fixing the size makes the whole layout deterministic:
+            # Fix the flash map. Left to itself the Partition Manager sizes the
+            # two application slots first and hands settings_storage whatever is
+            # left over -- on this 1 MB part a single 0x2000, which is the bare
+            # two sectors Zephyr NVS will accept and a 5x cut from what the
+            # firmware was written against. The obvious knob,
+            # CONFIG_PM_PARTITION_SIZE_SETTINGS_STORAGE, is a *hex*-typed Kconfig
+            # symbol and zephyr_add_prj_conf can only emit ints in decimal, so a
+            # request for 0xA000 is written as "40960" and re-read as 0x40960.
+            # State the layout instead; PM fills the single gap left for
+            # mcuboot_primary and these match the slot labels below.
             #   mcuboot   0x00000..0x0C000   (0xC000)
-            #   primary   0x0C000..0x81000   (0x75000)
+            #   primary   0x0C000..0x81000   (0x75000)   <- the gap
             #   secondary 0x81000..0xF6000   (0x75000)
             #   settings  0xF6000..0x100000  (0xA000)
-            # 0xA000 is chosen so both slots land on a 4 KiB boundary.
-            zephyr_add_prj_conf("PM_PARTITION_SIZE_SETTINGS_STORAGE", 0xA000)
+            zephyr_add_pm_static(
+                [
+                    Section("mcuboot", 0x0, 0xC000, "flash_primary"),
+                    Section("mcuboot_secondary", 0x81000, 0x75000, "flash_primary"),
+                    Section("settings_storage", 0xF6000, 0xA000, "flash_primary"),
+                ]
+            )
             mcuboot_conf = "xiao_ble_mcuboot.conf"
             mcuboot_overlay = "xiao_ble_mcuboot.overlay"
             mcuboot_slots = """
