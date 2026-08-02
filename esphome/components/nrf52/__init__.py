@@ -103,9 +103,18 @@ XIAO_BLE = "xiao_ble"
 NRF52840_FLASH_SIZE = 0x100000
 FLASH_SECTOR_SIZE = 0x1000
 # Enough for MCUboot with USB-CDC serial recovery and the management groups that
-# make a board which will not boot diagnosable over that same connection. The
-# build measures around 53 KB; dropping serial recovery would fit half this.
-MCUBOOT_PARTITION_SIZE = 0x10000
+# make a board which will not boot diagnosable over that same connection.
+#
+# LOCAL DEVIATION -- do not carry this to the upstream branch. Upstream uses
+# 0x10000, because the board-agnostic overlay keeps every peripheral enabled and
+# the resulting bootloader (~53 KB) does not fit 48 KB. Here the overlay disables
+# what a xiao_ble bootloader does not need, which buys back the ~9.7 KB needed to
+# stay at 0xC000 -- and 0xC000 is the size already flashed on our boards. Moving
+# it would relocate slot0 from 0xC200 to 0x10200, so an OTA'd image would be
+# copied to an address it was not linked for; with overwrite-only there is no
+# revert, and every board would need an SWD reflash to recover. Keep both this
+# and the overlay's disable list, or neither.
+MCUBOOT_PARTITION_SIZE = 0xC000
 # Zephyr NVS, behind esphome's preferences.
 SETTINGS_PARTITION_SIZE = 0xA000
 
