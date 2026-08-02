@@ -23,3 +23,60 @@
         compatible = "zephyr,cdc-acm-uart";
     };
 };
+
+/*
+ * LOCAL DEVIATION -- do not carry this to the upstream branch.
+ *
+ * Everything below is xiao_ble-specific and exists only to keep the bootloader
+ * inside a 48 KB partition (MCUBOOT_PARTITION_SIZE = 0xC000 in __init__.py),
+ * which is the size already flashed on our boards. Upstream deliberately has no
+ * disable list: it is what makes the overlay board-agnostic, and it pays for
+ * that with a 64 KB partition. The two go together -- restoring 0x10000 without
+ * dropping this list just wastes 16 KB of slot.
+ *
+ * A bootloader needs USB and flash. It does not need the radio, the analog
+ * front end, the external QSPI part, or any of the pin peripherals: serial
+ * recovery is entered by an invalid primary slot, not by a GPIO
+ * (BOOT_SERIAL_ENTRANCE_GPIO=n).
+ */
+/ {
+    leds {
+        status = "disabled";
+    };
+    pwmleds {
+        status = "disabled";
+    };
+};
+&adc {
+    status = "disabled";
+};
+&gpiote {
+    status = "disabled";
+};
+&gpio0 {
+    status = "disabled";
+};
+&gpio1 {
+    status = "disabled";
+};
+&i2c1 {
+    status = "disabled";
+};
+&ieee802154 {
+    status = "disabled";
+};
+&pwm0 {
+    status = "disabled";
+};
+&qspi {
+    status = "disabled";
+};
+&p25q16h {
+    status = "disabled";
+};
+&spi2 {
+    status = "disabled";
+};
+&uart0 {
+    status = "disabled";
+};
