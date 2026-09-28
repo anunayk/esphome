@@ -528,6 +528,20 @@ class Logger final : public Component {
 };
 extern Logger *global_logger;  // NOLINT(cppcoreguidelines-avoid-non-const-global-variables)
 
+#ifdef USE_ZEPHYR
+/// The fatal error that k_sys_fatal_error_handler() recorded before the last reboot.
+struct ZephyrCrash {
+  uint32_t reason;  // K_ERR_* code
+  uint32_t pc;
+  uint32_t lr;
+};
+
+/// Copies the record of a fatal error in this image into `out`, clears it and returns true.
+/// Returns false when there is no record, or when a different image wrote it (the config hash
+/// differs). One crash gives true once per boot and never after a later reboot.
+bool take_crash(ZephyrCrash *out);
+#endif
+
 class LoggerMessageTrigger final : public Trigger<uint8_t, const char *, const char *> {
  public:
   explicit LoggerMessageTrigger(Logger *parent, uint8_t level) : level_(level) {

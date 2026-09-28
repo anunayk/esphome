@@ -39,6 +39,36 @@ __attribute__((section(".noinit"))) struct {
 
 ESPHOME_LOG_TAG(TAG, "logger");
 
+// A copy of crash_buf, taken once per boot. crash_buf.magic is cleared when the copy is taken,
+// so the record does not survive the next reboot. take_crash() empties the copy, and
+// Logger::pre_setup() runs dump_crash_() before any component can call it.
+static bool crash_taken = false;  // NOLINT(cppcoreguidelines-avoid-non-const-global-variables)
+static bool crash_valid = false;  // NOLINT(cppcoreguidelines-avoid-non-const-global-variables)
+static ZephyrCrash crash_copy;    // NOLINT(cppcoreguidelines-avoid-non-const-global-variables)
+
+static void latch_crash() {
+  if (crash_taken) {
+    return;
+  }
+  crash_taken = true;
+  if (crash_buf.magic != App.get_config_hash()) {
+    return;
+  }
+  crash_copy = {crash_buf.reason, crash_buf.pc, crash_buf.lr};
+  crash_valid = true;
+  crash_buf.magic = 0;
+}
+
+bool take_crash(ZephyrCrash *out) {
+  latch_crash();
+  if (!crash_valid) {
+    return false;
+  }
+  *out = crash_copy;
+  crash_valid = false;
+  return true;
+}
+
 #ifdef USE_LOGGER_UART_SELECTION_USB_CDC
 void Logger::cdc_loop_() {
   if (this->uart_ != UART_SELECTION_USB_CDC || this->uart_dev_ == nullptr) {
@@ -201,11 +231,12 @@ void Logger::dump_bootloader_() {
 
 void Logger::dump_crash_() {
   ESP_LOGD(TAG, "Crash buffer address %p", &crash_buf);
-  if (crash_buf.magic == App.get_config_hash()) {
+  latch_crash();
+  if (crash_valid) {
     char reason_buf[REASON_BUF_SIZE];
     ESP_LOGE(TAG, "Last crash:");
-    ESP_LOGE(TAG, "Reason=%s PC=0x%08x LR=0x%08x", reason_to_str(crash_buf.reason, reason_buf), crash_buf.pc,
-             crash_buf.lr);
+    ESP_LOGE(TAG, "Reason=%s PC=0x%08x LR=0x%08x", reason_to_str(crash_copy.reason, reason_buf), crash_copy.pc,
+             crash_copy.lr);
 #if defined(CONFIG_THREAD_NAME)
     ESP_LOGE(TAG, "Thread: %s", crash_buf.thread);
 #endif
@@ -223,6 +254,9 @@ void k_sys_fatal_error_handler(unsigned int reason, const FatalErrorEsf *esf) {
   if (esf) {
     crash_buf.pc = esf->basic.pc;
     crash_buf.lr = esf->basic.lr;
+  } else {
+    crash_buf.pc = 0;
+    crash_buf.lr = 0;
   }
 #if defined(CONFIG_THREAD_NAME)
   auto thread = k_current_get();
