@@ -8,6 +8,9 @@ Lock in the macOS-specific fixes:
   * _smpmgr_upload() routes by port type: serial transport only for
     filesystem paths (/dev/..., COMx), BLE transport for everything else
     (macOS identifies BLE peripherals by a CoreBluetooth UUID, not a MAC).
+  * _is_no_free_slot() recognises the SMP image-management NO_FREE_SLOT error
+    so a stale pending slot that cannot be erased remotely surfaces an
+    actionable recovery message instead of an opaque traceback.
 """
 
 import asyncio
@@ -16,6 +19,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from smp.image_management import IMG_MGMT_ERR
 
 from esphome.components.nrf52 import ota
 from esphome.core import EsphomeError
@@ -130,3 +134,21 @@ def test_upload_routes_ble_handle_to_ble_transport(monkeypatch) -> None:
     captured, _, ble_sentinel = _capture_upload_transport(monkeypatch, ble_handle)
     assert captured["transport"] is ble_sentinel
     assert captured["address"] == ble_handle
+
+
+def test_is_no_free_slot_true_for_image_mgmt_error() -> None:
+    """An image-management error carrying IMG_MGMT_ERR.NO_FREE_SLOT is detected."""
+    response = SimpleNamespace(err=SimpleNamespace(rc=IMG_MGMT_ERR.NO_FREE_SLOT))
+    assert ota._is_no_free_slot(response) is True
+
+
+def test_is_no_free_slot_false_for_other_image_mgmt_error() -> None:
+    """A different image-management rc must not be mistaken for NO_FREE_SLOT."""
+    response = SimpleNamespace(err=SimpleNamespace(rc=IMG_MGMT_ERR.FLASH_WRITE_FAILED))
+    assert ota._is_no_free_slot(response) is False
+
+
+def test_is_no_free_slot_false_without_err() -> None:
+    """A response without an `err` attribute (e.g. success) is not NO_FREE_SLOT."""
+    assert ota._is_no_free_slot(SimpleNamespace()) is False
+    assert ota._is_no_free_slot(SimpleNamespace(err=None)) is False
