@@ -147,8 +147,16 @@ void AsyncWebServer::safe_close_with_shutdown(httpd_handle_t hd, int sockfd) {
   close(sockfd);
 }
 
+// Optional hook that an application links to release work it holds on server sockets, for
+// example pending async requests, before httpd_stop(). It runs on the caller of end(), never on
+// the httpd task.
+extern "C" void web_server_idf_before_stop(httpd_handle_t server) __attribute__((weak));
+
 void AsyncWebServer::end() {
   if (this->server_) {
+    if (web_server_idf_before_stop != nullptr) {
+      web_server_idf_before_stop(this->server_);
+    }
     httpd_stop(this->server_);
     this->server_ = nullptr;
   }
@@ -162,6 +170,9 @@ void AsyncWebServer::begin() {
   httpd_config_t config = HTTPD_DEFAULT_CONFIG();
   config.stack_size = 4512;
   config.server_port = this->port_;
+  // The IDF default backlog of 5 drops SYNs when a client opens many connections at once.
+  // The application must size CONFIG_LWIP_TCP_ACCEPTMBOX_SIZE to at least this value.
+  config.backlog_conn = 12;
   config.max_open_sockets = WEB_SERVER_MAX_OPEN_SOCKETS;
   config.uri_match_fn = [](const char * /*unused*/, const char * /*unused*/, size_t /*unused*/) { return true; };
   // Always enable LRU purging to handle socket exhaustion gracefully.
