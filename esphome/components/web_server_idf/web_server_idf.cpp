@@ -127,8 +127,16 @@ void AsyncWebServer::safe_close_with_shutdown(httpd_handle_t hd, int sockfd) {
   close(sockfd);
 }
 
+// Optional hook that an application links to release work it holds on server sockets, for
+// example pending async requests, before httpd_stop(). It runs on the caller of end(), never on
+// the httpd task.
+extern "C" void web_server_idf_before_stop(httpd_handle_t server) __attribute__((weak));
+
 void AsyncWebServer::end() {
   if (this->server_) {
+    if (web_server_idf_before_stop != nullptr) {
+      web_server_idf_before_stop(this->server_);
+    }
     httpd_stop(this->server_);
     this->server_ = nullptr;
   }
@@ -143,6 +151,9 @@ void AsyncWebServer::begin() {
   httpd_config_t config = HTTPD_DEFAULT_CONFIG();
   config.stack_size = config.stack_size + 256;
   config.server_port = this->port_;
+  // The IDF default backlog of 5 drops SYNs when a client opens many connections at once.
+  // The application must size CONFIG_LWIP_TCP_ACCEPTMBOX_SIZE to at least this value.
+  config.backlog_conn = 12;
   // Optionally raise the concurrent-connection ceiling (default 7). The socket
   // component reserves matching lwIP headroom so esp_http_server's requirement of
   // CONFIG_LWIP_MAX_SOCKETS >= max_open_sockets + 3 holds.
