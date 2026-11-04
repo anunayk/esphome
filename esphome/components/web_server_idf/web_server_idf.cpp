@@ -166,9 +166,10 @@ void AsyncWebServer::begin() {
   if (this->server_) {
     this->end();
   }
-  // Allow room for SerializationBuffer's 640-byte stack buffer and HTTP request handling.
+  // Allow room for SerializationBuffer's 640-byte buffer, request handling, and application send overrides.
+  // Keep the old fork's 4864-byte stack (4096-byte IDF default + 256 for JSON + 512 for send overrides).
   httpd_config_t config = HTTPD_DEFAULT_CONFIG();
-  config.stack_size = 4512;
+  config.stack_size = 4864;
   config.server_port = this->port_;
   // The IDF default backlog of 5 drops SYNs when a client opens many connections at once.
   // The application must size CONFIG_LWIP_TCP_ACCEPTMBOX_SIZE to at least this value.
