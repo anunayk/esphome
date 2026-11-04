@@ -147,9 +147,10 @@ void AsyncWebServer::begin() {
     this->end();
   }
   // Default httpd stack is defined by ESP-IDF. Increase to accommodate SerializationBuffer's
-  // 640-byte stack buffer used by web_server JSON request handlers.
+  // 640-byte stack buffer used by web_server JSON request handlers, plus 512 B for applications
+  // that send replies through a send override (engineering/firmware#538 measured 504 B free).
   httpd_config_t config = HTTPD_DEFAULT_CONFIG();
-  config.stack_size = config.stack_size + 256;
+  config.stack_size = config.stack_size + 768;
   config.server_port = this->port_;
   // The IDF default backlog of 5 drops SYNs when a client opens many connections at once.
   // The application must size CONFIG_LWIP_TCP_ACCEPTMBOX_SIZE to at least this value.
