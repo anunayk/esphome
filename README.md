@@ -87,6 +87,8 @@ SPI20 uses P1 pins at up to 8 MHz.
 SPI00 uses P2 pins at up to 32 MHz with extra-high drive.
 The radio remains limited to 8 MHz.
 I2C uses TWIM21 on P1, separate from SPI20.
+SPIM00 shares its peripheral address with UART00, but it has no I2C controller.
+BLE NUS explicitly enables the Zephyr ring buffer on nRF54L15.
 The ADC accepts AIN0–AIN7 or their GPIO pins.
 AIN0–AIN3 map to P1.04–P1.07, and AIN4–AIN7 map to P1.11–P1.14.
 Its internal reference is 0.9 V with gain 1/4.
@@ -113,6 +115,9 @@ Images use hash-only validation without a signing key.
 BLE SMP writes image 0 through the secondary slot with confirm-only updates.
 Buffered SMP uploads can keep 4-byte transport alignment.
 There is no USB or serial recovery.
+The nRF54L15 MCUboot profile replaces the SDK default configuration.
+It keeps boot logging disabled without RTC timer options.
+The generated MCUboot fragment still applies the selected low-frequency clock.
 The first flash and recovery use SWD with J-Link.
 `esphome upload --device JLINK` selects the `nRF54L15_M33` device.
 

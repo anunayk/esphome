@@ -486,10 +486,10 @@ def _add_nrf52_spi_overlay(spi: ConfigType, node: str) -> None:
     drive = "nordic,drive-mode = <NRF_DRIVE_E0E1>;" if nrf54l15 and node == "spi00" else ""
     if nrf54l15:
         instance = node.removeprefix("spi")
-        zephyr_add_overlay(
-            f'&uart{instance} {{ status = "disabled"; }};'
-            f'&i2c{instance} {{ status = "disabled"; }};'
-        )
+        zephyr_add_overlay(f'&uart{instance} {{ status = "disabled"; }};')
+        # Serial instance 00 has no I2C controller.
+        if node != "spi00":
+            zephyr_add_overlay(f'&i2c{instance} {{ status = "disabled"; }};')
     zephyr_add_overlay(
         f"""
             &pinctrl {{
