@@ -469,7 +469,15 @@ async def register_time(time_var, config):
 @coroutine_with_priority(CoroPriority.CORE)
 async def to_code(config):
     if CORE.using_zephyr:
-        zephyr_add_prj_conf("POSIX_CLOCK", True)
+        from esphome.components.nrf52.const import VARIANT_NRF54L15
+        from esphome.components.nrf52.framework import get_nrf52_variant
+
+        option = (
+            "POSIX_TIMERS"
+            if get_nrf52_variant() == VARIANT_NRF54L15
+            else "POSIX_CLOCK"
+        )
+        zephyr_add_prj_conf(option, True)
         # From sdk-nrf 2.8.0 newlib time() gets the clock through gettimeofday(),
         # which Zephyr only provides with XSI_SINGLE_PROCESS. Without it time()
         # always returns -1.

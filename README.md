@@ -40,7 +40,7 @@ external_components:
       type: git
       url: https://github.com/anunayk/esphome
       ref: nrf54l15-integration-2026.9.0
-    components: [nrf52, zephyr, logger, adc, spi, i2c]
+    components: [nrf52, zephyr, logger, adc, spi, i2c, ble_nus, time]
 
 nrf52:
   board: nrf54l15dk/nrf54l15/cpuapp
@@ -51,6 +51,7 @@ nrf52:
   dk_peripherals: false
   framework:
     version: 2.9.2
+    libc_nano: false
     advanced:
       enable_ota_rollback: false
 
@@ -89,6 +90,7 @@ The radio remains limited to 8 MHz.
 I2C uses TWIM21 on P1, separate from SPI20.
 SPIM00 shares its peripheral address with UART00, but it has no I2C controller.
 BLE NUS explicitly enables the Zephyr ring buffer on nRF54L15.
+Time components use `POSIX_TIMERS` instead of the deprecated `POSIX_CLOCK` option on nRF54L15.
 The ADC accepts AIN0–AIN7 or their GPIO pins.
 AIN0–AIN3 map to P1.04–P1.07, and AIN4–AIN7 map to P1.11–P1.14.
 Its internal reference is 0.9 V with gain 1/4.
