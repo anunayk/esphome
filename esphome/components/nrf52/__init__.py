@@ -449,7 +449,6 @@ def _mcuboot_nrf54l15_to_code() -> None:
     zephyr_add_sysbuild_conf("BOOT_SIGNATURE_TYPE_NONE", True)
     zephyr_add_sysbuild_conf("MCUBOOT_MODE_OVERWRITE_ONLY", True)
     zephyr_add_sysbuild_conf("PM_MCUBOOT_PAD", HexValue(NRF54L15_IMAGE_HEADER_SIZE))
-    zephyr_add_sysbuild_conf("MCUBOOT_FPROTECT_ALLOW_COMBINED_REGIONS", False)
     zephyr_add_pm_static(
         [
             Section("mcuboot", 0, NRF54L15_MCUBOOT_SIZE, "flash_primary"),
@@ -460,6 +459,10 @@ def _mcuboot_nrf54l15_to_code() -> None:
     add_extra_build_file(
         "zephyr/sysbuild/mcuboot/prj.conf",
         Path(__file__).parent / "mcuboot_nrf54l15.conf",
+    )
+    add_extra_build_file(
+        "zephyr/Kconfig.sysbuild",
+        Path(__file__).parent / "Kconfig.nrf54l15.sysbuild",
     )
     partitions = """
         &cpuapp_rram {

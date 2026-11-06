@@ -84,7 +84,8 @@ def test_rram_layout_and_header(nrf54: dict) -> None:
         assert "partition@c2000" in overlay
         assert "partition@174000" in overlay
         assert "zephyr_udc0" not in overlay
-    assert conf["SB_CONFIG_MCUBOOT_FPROTECT_ALLOW_COMBINED_REGIONS"] is False
+    kconfig = zephyr_data()[KEY_EXTRA_BUILD_FILES]["zephyr/Kconfig.sysbuild"]
+    assert "config MCUBOOT_FPROTECT_ALLOW_COMBINED_REGIONS\n\tdefault n" in kconfig.read_text()
     fragment = zephyr_data()[KEY_EXTRA_BUILD_FILES]["zephyr/sysbuild/mcuboot/prj.conf"]
     assert "CONFIG_MCUBOOT_SERIAL=n" in fragment.read_text()
     assert "CONFIG_BOOT_MAX_IMG_SECTORS=256" in fragment.read_text()

@@ -1,0 +1,5 @@
+# The nRF54L15 boot profile disables FPROTECT, as the NCS board configuration does.
+config MCUBOOT_FPROTECT_ALLOW_COMBINED_REGIONS
+	default n
+
+source "share/sysbuild/Kconfig"
