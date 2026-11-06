@@ -21,6 +21,8 @@ from esphome.components.esp32 import (
     require_idf_version,
 )
 from esphome.components.psram import DOMAIN as PSRAM_DOMAIN
+from esphome.components.nrf52.const import VARIANT_NRF54L15
+from esphome.components.nrf52.framework import get_nrf52_variant
 from esphome.components.zephyr import zephyr_add_overlay, zephyr_add_prj_conf
 from esphome.config_helpers import filter_source_files_from_platform
 import esphome.config_validation as cv
@@ -101,6 +103,8 @@ def _render_hz(value: float) -> str:
 def _frequency_validator(value: Any) -> float:
     platform = get_target_platform()
     frequency = PLATFORM_SPI_CLOCKS[platform]
+    if platform == PLATFORM_NRF52 and get_nrf52_variant() == VARIANT_NRF54L15:
+        frequency = 32e6
     value = cv.frequency(value)
     if value > frequency:
         raise cv.Invalid(
@@ -222,6 +226,8 @@ def get_hw_interface_list() -> list[list[str]]:
     if target_platform == PLATFORM_RP2:
         return [["spi"], ["spi1"]]
     if target_platform == PLATFORM_NRF52:
+        if get_nrf52_variant() == VARIANT_NRF54L15:
+            return [["spi", "spi20"], ["spi00"]]
         return [["spi", "spi2"]]
     return []
 
@@ -290,12 +296,22 @@ def validate_hw_pins(spi: ConfigType, index: int = -1) -> bool:
         return clk_pin_no >= 0
 
     if target_platform == PLATFORM_NRF52:
-        # Expander pin numbers would be mapped into NRF_PSEL and route the bus to the wrong pads
-        return all(
+        if not all(
             pins.PIN_SCHEMA_REGISTRY.get_key(spi[key]) == PLATFORM_NRF52
             for key in (CONF_CLK_PIN, CONF_MOSI_PIN, CONF_MISO_PIN)
             if key in spi
-        )
+        ):
+            return False
+        if get_nrf52_variant() == VARIANT_NRF54L15:
+            port = clk_pin_no // 32
+            if port not in (1, 2):
+                return False
+            if index >= 0 and port != (1, 2)[index]:
+                return False
+            return all(
+                pin == -1 or pin // 32 == port for pin in (sdo_pin_no, sdi_pin_no)
+            )
+        return clk_pin_no >= 0
 
     if target_platform == PLATFORM_RP2:
         if index == -1:
@@ -376,6 +392,8 @@ def get_spi_interface(index: int) -> str:
     if platform == PLATFORM_RP2:
         return ["&SPI", "&SPI1"][index]
     if platform == PLATFORM_NRF52:
+        if get_nrf52_variant() == VARIANT_NRF54L15:
+            return f"DEVICE_DT_GET(DT_NODELABEL({get_hw_interface_list()[index][-1]}))"
         return "DEVICE_DT_GET(DT_NODELABEL(spi2))"
     if index == 0:
         return "&SPI"
@@ -451,8 +469,8 @@ CONFIG_SCHEMA = cv.All(
 )
 
 
-def _add_nrf52_spi2_overlay(spi: ConfigType) -> None:
-    """Route SPIM2 to the configured pins; a board file may leave spi2 on the legacy non-DMA driver."""
+def _add_nrf52_spi_overlay(spi: ConfigType, node: str) -> None:
+    """Route the selected SPIM instance to the configured pins."""
     zephyr_add_prj_conf("SPI", True)
     signals = [("SCK", spi[CONF_CLK_PIN])]
     if (mosi := spi.get(CONF_MOSI_PIN)) is not None:
@@ -463,26 +481,37 @@ def _add_nrf52_spi2_overlay(spi: ConfigType) -> None:
         f"<NRF_PSEL(SPIM_{signal}, {pin[CONF_NUMBER] // 32}, {pin[CONF_NUMBER] % 32})>"
         for signal, pin in signals
     )
+    nrf54l15 = get_nrf52_variant() == VARIANT_NRF54L15
+    extra_properties = "/delete-property/ cs-gpios;" if nrf54l15 else ""
+    drive = "nordic,drive-mode = <NRF_DRIVE_E0E1>;" if nrf54l15 and node == "spi00" else ""
+    if nrf54l15:
+        instance = node.removeprefix("spi")
+        zephyr_add_overlay(
+            f'&uart{instance} {{ status = "disabled"; }};'
+            f'&i2c{instance} {{ status = "disabled"; }};'
+        )
     zephyr_add_overlay(
         f"""
             &pinctrl {{
-                spi2_default: spi2_default {{
+                {node}_default: {node}_default {{
                     group1 {{
                         psels = {psels};
+                        {drive}
                     }};
                 }};
-                spi2_sleep: spi2_sleep {{
+                {node}_sleep: {node}_sleep {{
                     group1 {{
                         psels = {psels};
                         low-power-enable;
                     }};
                 }};
             }};
-            &spi2 {{
+            &{node} {{
                 compatible = "nordic,nrf-spim";
                 status = "okay";
-                pinctrl-0 = <&spi2_default>;
-                pinctrl-1 = <&spi2_sleep>;
+                {extra_properties}
+                pinctrl-0 = <&{node}_default>;
+                pinctrl-1 = <&{node}_sleep>;
                 pinctrl-names = "default", "sleep";
                 overrun-character = <0>;
             }};
@@ -508,8 +537,13 @@ async def to_code(configs: list[ConfigType]) -> None:
             interface = get_spi_interface(index)
             cg.add(var.set_interface(cg.RawExpression(interface)))
             if CORE.using_zephyr:
-                _add_nrf52_spi2_overlay(spi)
-                cg.add(var.set_interface_name("spi2"))
+                node = (
+                    get_hw_interface_list()[index][-1]
+                    if get_nrf52_variant() == VARIANT_NRF54L15
+                    else "spi2"
+                )
+                _add_nrf52_spi_overlay(spi, node)
+                cg.add(var.set_interface_name(node))
             else:
                 cg.add(
                     var.set_interface_name(
@@ -629,6 +663,17 @@ def _validate_nrf52_hw_data_rate(value: float) -> None:
 
 def _final_validate(config: Any) -> Any:
     buses = config if isinstance(config, list) else [config]
+    if CORE.is_nrf52 and get_nrf52_variant() == VARIANT_NRF54L15:
+        hardware_buses = {
+            bus[CONF_ID]: bus[CONF_INTERFACE_INDEX]
+            for bus in buses
+            if CONF_INTERFACE_INDEX in bus
+        }
+        for candidate, path in _walk_config(fv.full_config.get()):
+            index = hardware_buses.get(candidate.get(CONF_SPI_ID))
+            if index is not None and candidate.get(CONF_DATA_RATE, 0) > (8e6, 32e6)[index]:
+                with cv.prepend_path([cv.ROOT_CONFIG_PATH, *path, CONF_DATA_RATE]):
+                    raise cv.Invalid("SPI data rate exceeds the selected power domain limit")
     software_bus_ids = {
         bus[CONF_ID] for bus in buses if CONF_INTERFACE_INDEX not in bus
     }

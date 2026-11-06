@@ -1,0 +1,25 @@
+/* The module reuses the DK pins for its radio and sensors. */
+/ {
+    leds { status = "disabled"; };
+    buttons { status = "disabled"; };
+    pwmleds { status = "disabled"; };
+    chosen {
+        /delete-property/ zephyr,console;
+        /delete-property/ zephyr,shell-uart;
+        /delete-property/ zephyr,uart-mcumgr;
+        /delete-property/ zephyr,bt-mon-uart;
+        /delete-property/ zephyr,bt-c2h-uart;
+    };
+};
+&led0 { status = "disabled"; };
+&led1 { status = "disabled"; };
+&led2 { status = "disabled"; };
+&led3 { status = "disabled"; };
+&button0 { status = "disabled"; };
+&button1 { status = "disabled"; };
+&button2 { status = "disabled"; };
+&button3 { status = "disabled"; };
+&pwm20 { status = "disabled"; };
+&uart20 { status = "disabled"; };
+&mx25r64 { status = "disabled"; };
+&spi00 { status = "disabled"; };
