@@ -61,6 +61,11 @@ CONFIG_SCHEMA = cv.All(
 async def to_code(config: ConfigType) -> None:
     var = cg.new_Pvariable(config[CONF_ID])
     zephyr_add_prj_conf("BT_NUS", True)
+    from esphome.components.nrf52.const import VARIANT_NRF54L15
+    from esphome.components.nrf52.framework import get_nrf52_variant
+
+    if get_nrf52_variant() == VARIANT_NRF54L15:
+        zephyr_add_prj_conf("RING_BUFFER", True)
     expose_log = config[CONF_TYPE] == CONF_LOGS
     cg.add(var.set_expose_log(expose_log))
     if expose_log:

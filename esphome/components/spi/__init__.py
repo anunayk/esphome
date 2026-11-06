@@ -482,10 +482,10 @@ async def to_code(configs: list[ConfigType]) -> None:
             )
             if nrf54l15:
                 instance = node.removeprefix("spi")
-                zephyr_add_overlay(
-                    f'&uart{instance} {{ status = "disabled"; }};'
-                    f'&i2c{instance} {{ status = "disabled"; }};'
-                )
+                zephyr_add_overlay(f'&uart{instance} {{ status = "disabled"; }};')
+                # Serial instance 00 has SPI and UART, but no I2C controller.
+                if node != "spi00":
+                    zephyr_add_overlay(f'&i2c{instance} {{ status = "disabled"; }};')
             psels = f"<NRF_PSEL(SPIM_SCK, {clk_pin // 32}, {clk_pin % 32})>"
             if mosi_pin is not None:
                 psels += f", <NRF_PSEL(SPIM_MOSI, {mosi_pin // 32}, {mosi_pin % 32})>"

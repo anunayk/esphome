@@ -84,7 +84,8 @@ def test_rram_layout_and_header(nrf54: dict) -> None:
         assert "partition@c2000" in overlay
         assert "partition@174000" in overlay
         assert "zephyr_udc0" not in overlay
-    fragment = zephyr_data()[KEY_EXTRA_BUILD_FILES]["zephyr/sysbuild/mcuboot.conf"]
+    assert conf["SB_CONFIG_MCUBOOT_FPROTECT_ALLOW_COMBINED_REGIONS"] is False
+    fragment = zephyr_data()[KEY_EXTRA_BUILD_FILES]["zephyr/sysbuild/mcuboot/prj.conf"]
     assert "CONFIG_MCUBOOT_SERIAL=n" in fragment.read_text()
     assert "CONFIG_BOOT_MAX_IMG_SECTORS=256" in fragment.read_text()
 
@@ -248,6 +249,9 @@ def test_spi_codegen_uses_distinct_nodes(nrf54: dict) -> None:
     assert "NRF_PSEL(SPIM_SCK, 1, 6)" in overlay
     assert "NRF_PSEL(SPIM_SCK, 2, 6)" in overlay
     assert "NRF_DRIVE_E0E1" in overlay
+    assert "&i2c00" not in overlay
+    assert '&i2c20 { status = "disabled"; }' in overlay
+    assert '&uart00 { status = "disabled"; }' in overlay
 
 
 def test_i2c_codegen_uses_twim21(nrf54: dict) -> None:
@@ -272,3 +276,24 @@ def test_i2c_codegen_uses_twim21(nrf54: dict) -> None:
     assert "&i2c21" in overlay
     assert "NRF_PSEL(TWIM_SDA, 1, 9)" in overlay
     assert "NRF_PSEL(TWIM_SCL, 1, 10)" in overlay
+
+
+@pytest.mark.parametrize("variant", [VARIANT_NRF54L15, VARIANT_NRF52840])
+def test_nus_ring_buffer_dependency(nrf54: dict, variant: str) -> None:
+    from esphome.components import ble_nus
+
+    set_nrf52_variant(variant)
+    config = ble_nus.CONFIG_SCHEMA({})
+    with (
+        patch.object(ble_nus.cg, "new_Pvariable", return_value=MagicMock()),
+        patch.object(ble_nus.cg, "register_component", AsyncMock()),
+        patch.object(ble_nus.cg, "add"),
+        patch.object(ble_nus.cg, "add_define"),
+        patch.object(ble_nus, "request_log_listener"),
+    ):
+        asyncio.run(ble_nus.to_code(config))
+    conf = zephyr_data()[KEY_PRJ_CONF][""]
+    if variant == VARIANT_NRF54L15:
+        assert conf["CONFIG_RING_BUFFER"][0] is True
+    else:
+        assert "CONFIG_RING_BUFFER" not in conf
