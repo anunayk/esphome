@@ -88,6 +88,7 @@ def test_rram_layout_and_header(nrf54: dict) -> None:
     assert "config MCUBOOT_FPROTECT_ALLOW_COMBINED_REGIONS\n\tdefault n" in kconfig.read_text()
     fragment = zephyr_data()[KEY_EXTRA_BUILD_FILES]["zephyr/sysbuild/mcuboot/prj.conf"]
     assert "CONFIG_MCUBOOT_SERIAL=n" in fragment.read_text()
+    assert "CONFIG_NCS_BOOT_BANNER=n" in fragment.read_text()
     assert "CONFIG_BOOT_MAX_IMG_SECTORS=256" in fragment.read_text()
 
 
@@ -298,3 +299,19 @@ def test_nus_ring_buffer_dependency(nrf54: dict, variant: str) -> None:
         assert conf["CONFIG_RING_BUFFER"][0] is True
     else:
         assert "CONFIG_RING_BUFFER" not in conf
+
+
+@pytest.mark.parametrize(
+    "variant,option",
+    [(VARIANT_NRF54L15, "POSIX_TIMERS"), (VARIANT_NRF52840, "POSIX_CLOCK")],
+)
+def test_time_clock_option(nrf54: dict, variant: str, option: str) -> None:
+    from esphome.components import time
+
+    set_nrf52_variant(variant)
+    with (
+        patch.object(time.cg, "add_define"),
+        patch.object(time.cg, "add_global"),
+    ):
+        asyncio.run(time.to_code({}))
+    assert zephyr_data()[KEY_PRJ_CONF][""][f"CONFIG_{option}"][0] is True
