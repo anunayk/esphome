@@ -302,6 +302,21 @@ async def to_code(config: ConfigType) -> None:
         i2c = "i2c0"
         if zephyr_data()[KEY_BOARD] == "xiao_ble":
             i2c = "i2c1"
+        from esphome.components.nrf52.const import VARIANT_NRF54L15
+        from esphome.components.nrf52.framework import get_nrf52_variant
+
+        if get_nrf52_variant() == VARIANT_NRF54L15:
+            if any(config[pin] // 32 != 1 for pin in (CONF_SDA, CONF_SCL)):
+                raise cv.Invalid("nRF54L15 I2C21 requires P1 pins")
+            i2c = "i2c21"
+            zephyr_add_overlay(f"""
+                &{i2c} {{
+                    status = "okay";
+                    pinctrl-0 = <&{i2c}_default>;
+                    pinctrl-1 = <&{i2c}_sleep>;
+                    pinctrl-names = "default", "sleep";
+                }};
+            """)
         zephyr_add_overlay(
             f"""
                 &pinctrl {{

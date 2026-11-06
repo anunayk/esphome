@@ -8,7 +8,9 @@ from esphome.components.esp32 import (
     include_builtin_idf_component,
     require_adc_oneshot_iram,
 )
-from esphome.components.nrf52.const import AIN_TO_GPIO, EXTRA_ADC
+from esphome.components.nrf52.const import EXTRA_ADC, VARIANT_NRF54L15
+from esphome.components.nrf52.framework import get_nrf52_variant
+from esphome.components.nrf52.gpio import analog_pin_map
 from esphome.components.zephyr import (
     zephyr_add_overlay,
     zephyr_add_overlay_builder,
@@ -196,13 +198,20 @@ async def to_code(config: ConfigType) -> None:
         adc = cg.new_Pvariable(nrf_saadc, rhs)
         cg.add(var.set_adc_channel(adc))
         gain = "ADC_GAIN_1_6"
+        if get_nrf52_variant() == VARIANT_NRF54L15:
+            gain = "ADC_GAIN_1_4"
         pin_number = config[CONF_PIN][CONF_NUMBER]
         if pin_number == "VDDHDIV5":
             gain = "ADC_GAIN_1_2"
         if isinstance(pin_number, int):
-            GPIO_TO_AIN = {v: k for k, v in AIN_TO_GPIO.items()}
+            GPIO_TO_AIN = {v: k for k, v in analog_pin_map().items()}
             pin_number = GPIO_TO_AIN[pin_number]
         zephyr_add_overlay_builder(_overlay_io_channels)
+        vref = (
+            "zephyr,vref-mv = <900>;"
+            if get_nrf52_variant() == VARIANT_NRF54L15
+            else ""
+        )
         zephyr_add_overlay(f"""
                 &adc {{
                     #address-cells = <1>;
@@ -212,6 +221,7 @@ async def to_code(config: ConfigType) -> None:
                         reg = <{channel_id}>;
                         zephyr,gain = "{gain}";
                         zephyr,reference = "ADC_REF_INTERNAL";
+                        {vref}
                         zephyr,acquisition-time = <ADC_ACQ_TIME_DEFAULT>;
                         zephyr,input-positive = <NRF_SAADC_{pin_number}>;
                         zephyr,resolution = <14>;

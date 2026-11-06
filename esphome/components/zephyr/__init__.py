@@ -197,7 +197,18 @@ async def _cdc_acm_to_code(config: ConfigType) -> None:
 def zephyr_setup_preferences() -> None:
     cg.add(zephyr_ns.setup_preferences())
     zephyr_add_prj_conf("SETTINGS", True)
-    zephyr_add_prj_conf("NVS", True)
+    if CORE.is_nrf52:
+        from esphome.components.nrf52.const import VARIANT_NRF54L15
+        from esphome.components.nrf52.framework import get_nrf52_variant
+
+        if get_nrf52_variant() == VARIANT_NRF54L15:
+            zephyr_add_prj_conf("ZMS", True)
+            zephyr_add_prj_conf("SETTINGS_ZMS", True)
+            zephyr_add_prj_conf("SETTINGS_NVS", False)
+        else:
+            zephyr_add_prj_conf("NVS", True)
+    else:
+        zephyr_add_prj_conf("NVS", True)
     zephyr_add_prj_conf("FLASH_MAP", True)
     zephyr_add_prj_conf("FLASH", True)
 

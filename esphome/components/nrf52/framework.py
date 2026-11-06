@@ -19,6 +19,20 @@ from esphome.framework_helpers import (
     str_to_lst_of_str,
 )
 
+from .const import VARIANT_NRF52840
+
+_KEY_NRF52_VARIANT = "nrf52_variant"
+
+
+def set_nrf52_variant(variant: str) -> None:
+    CORE.data[_KEY_NRF52_VARIANT] = variant
+
+
+def get_nrf52_variant() -> str:
+    """Return the selected SoC, or the legacy default before validation."""
+    return CORE.data.get(_KEY_NRF52_VARIANT, VARIANT_NRF52840)
+
+
 _LOGGER = logging.getLogger(__name__)
 
 _REQUIREMENTS = Path(__file__).parent / "requirements.txt"

@@ -98,6 +98,7 @@ LOG_LEVEL_SEVERITY = [
 UART0 = "UART0"
 UART1 = "UART1"
 UART2 = "UART2"
+UART30 = "UART30"
 UART0_SWAP = "UART0_SWAP"
 USB_SERIAL_JTAG = "USB_SERIAL_JTAG"
 USB_CDC = "USB_CDC"
@@ -140,6 +141,7 @@ UART_SELECTION_NRF52 = [USB_CDC, UART0]
 
 HARDWARE_UART_TO_UART_SELECTION = {
     UART0: logger_ns.UART_SELECTION_UART0,
+    UART30: logger_ns.UART_SELECTION_UART0,
     UART0_SWAP: logger_ns.UART_SELECTION_UART0_SWAP,
     UART1: logger_ns.UART_SELECTION_UART1,
     UART2: logger_ns.UART_SELECTION_UART2,
@@ -185,8 +187,21 @@ def uart_selection(value: Any) -> str:
     if CORE.is_host:
         raise cv.Invalid("Uart selection not valid for host platform")
     if CORE.is_nrf52:
+        from esphome.components.nrf52.const import VARIANT_NRF54L15
+        from esphome.components.nrf52.framework import get_nrf52_variant
+
+        if get_nrf52_variant() == VARIANT_NRF54L15:
+            return cv.one_of(UART0, UART30, upper=True)(value)
         return cv.one_of(*UART_SELECTION_NRF52, upper=True)(value)
     raise NotImplementedError
+
+
+def _zephyr_uart0_label() -> str:
+    """Return the default UART node for the selected SoC."""
+    from esphome.components.nrf52.const import VARIANT_CONSOLE_UART
+    from esphome.components.nrf52.framework import get_nrf52_variant
+
+    return VARIANT_CONSOLE_UART.get(get_nrf52_variant(), "uart0")
 
 
 def validate_local_no_higher_than_global(config: ConfigType) -> ConfigType:
@@ -490,9 +505,40 @@ async def _late_logger_init(config: ConfigType) -> None:
         # esphome implement own fatal error handler which save PC/LR before reset
         zephyr_add_prj_conf("RESET_ON_FATAL_ERROR", False)
         zephyr_add_prj_conf("THREAD_LOCAL_STORAGE", True)
+        uart_node = (
+            "uart30"
+            if config[CONF_HARDWARE_UART] == UART30
+            else _zephyr_uart0_label()
+        )
+        cg.add_define("ESPHOME_LOGGER_UART0_NODE", cg.RawExpression(uart_node))
         if has_serial_logging:
-            if config[CONF_HARDWARE_UART] == UART0:
-                zephyr_add_overlay("""&uart0 { status = "okay";};""")
+            if config[CONF_HARDWARE_UART] in (UART0, UART30):
+                zephyr_add_overlay(f'&{uart_node} {{ status = "okay"; }};')
+            if config[CONF_HARDWARE_UART] == UART30:
+                zephyr_add_overlay(f"""
+                    &pinctrl {{
+                        esphome_uart30_default: esphome_uart30_default {{
+                            group1 {{
+                                psels = <NRF_PSEL(UART_TX, 0, 3)>,
+                                        <NRF_PSEL(UART_RX, 0, 4)>;
+                            }};
+                        }};
+                        esphome_uart30_sleep: esphome_uart30_sleep {{
+                            group1 {{
+                                psels = <NRF_PSEL(UART_TX, 0, 3)>,
+                                        <NRF_PSEL(UART_RX, 0, 4)>;
+                                low-power-enable;
+                            }};
+                        }};
+                    }};
+                    &uart30 {{
+                        current-speed = <{baud_rate}>;
+                        /delete-property/ hw-flow-control;
+                        pinctrl-0 = <&esphome_uart30_default>;
+                        pinctrl-1 = <&esphome_uart30_sleep>;
+                        pinctrl-names = "default", "sleep";
+                    }};
+                """)
             if config[CONF_HARDWARE_UART] == UART1:
                 zephyr_add_overlay("""&uart1 { status = "okay";};""")
             if config[CONF_HARDWARE_UART] == USB_CDC:

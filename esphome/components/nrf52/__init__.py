@@ -10,6 +10,7 @@ import subprocess
 from esphome import pins
 import esphome.codegen as cg
 from esphome.components.zephyr import (
+    HexValue,
     Section,
     add_extra_build_file,
     add_extra_script,
@@ -66,22 +67,29 @@ from esphome.helpers import rmtree, write_file_if_changed
 from esphome.storage_json import StorageJSON
 from esphome.types import ConfigType
 
-from .boards import BOARDS_ZEPHYR, BOOTLOADER_CONFIG
+from .boards import BOARD_ALIASES, BOARDS_ZEPHYR, BOOTLOADER_CONFIG
 from .const import (
     BOOTLOADER_ADAFRUIT,
     BOOTLOADER_ADAFRUIT_NRF52_SD132,
     BOOTLOADER_ADAFRUIT_NRF52_SD140_V6,
     BOOTLOADER_ADAFRUIT_NRF52_SD140_V7,
+    VARIANT_NRF54L15,
+    VARIANT_NRF54LM20,
+    VARIANT_NRF51822,
+    VARIANT_NRF52840,
 )
 from .framework import (
     check_and_install,
     get_build_env,
     get_build_paths,
+    get_nrf52_variant,
+    set_nrf52_variant,
     setup_platformio_python_env,
 )
 
 # force import gpio to register pin schema
 from .gpio import nrf52_pin_to_code  # noqa: F401
+from .jlink import upload_using_jlink
 
 CODEOWNERS = ["@tomaszduda23"]
 AUTO_LOAD = ["zephyr", "preferences"]
@@ -92,6 +100,10 @@ _LOGGER = logging.getLogger(__name__)
 # sdk-nrf install cache and pins the clang-tidy project's SDK.
 RECOMMENDED_PLATFORMIO_VERSION = "2.6.1-b"
 RECOMMENDED_SDK_NRF_VERSION = "2.9.2"
+MIN_SDK_NRF_VERSIONS = {
+    VARIANT_NRF54L15: "2.9.2",
+    VARIANT_NRF54LM20: "3.4.1",
+}
 
 XIAO_BLE = "xiao_ble"
 
@@ -117,6 +129,11 @@ FLASH_SECTOR_SIZE = 0x1000
 MCUBOOT_PARTITION_SIZE = 0xC000
 # Zephyr NVS, behind esphome's preferences.
 SETTINGS_PARTITION_SIZE = 0xA000
+NRF54L15_RRAM_SIZE = 0x17D000
+NRF54L15_MCUBOOT_SIZE = 0x10000
+NRF54L15_SLOT_SIZE = 0xB2000
+NRF54L15_SETTINGS_SIZE = 0x9000
+NRF54L15_IMAGE_HEADER_SIZE = 0x800
 
 FAKE_BOARD_MANIFEST = """
 {
@@ -143,8 +160,21 @@ FAKE_BOARD_MANIFEST = """
 """
 
 
+def _board_variant(board: str) -> str:
+    """Read the SoC from the Zephyr board qualifiers."""
+    if board == "bbc_microbit":
+        return VARIANT_NRF51822
+    qualifiers = BOARD_ALIASES.get(board, board).lower().split("/")
+    if len(qualifiers) > 1 and qualifiers[1].startswith("nrf54lm20"):
+        return VARIANT_NRF54LM20
+    if len(qualifiers) > 1 and qualifiers[1].startswith("nrf54l15"):
+        return VARIANT_NRF54L15
+    return VARIANT_NRF52840
+
+
 def set_core_data(config: ConfigType) -> ConfigType:
     zephyr_set_core_data(config)
+    set_nrf52_variant(_board_variant(config[CONF_BOARD]))
     CORE.data[KEY_CORE][KEY_TARGET_PLATFORM] = PLATFORM_NRF52
     CORE.data[KEY_CORE][KEY_TARGET_FRAMEWORK] = KEY_ZEPHYR
 
@@ -158,13 +188,33 @@ _TOOLCHAINS = (Toolchain.PLATFORMIO, Toolchain.SDK_NRF)
 _resolve_toolchain = cv.resolve_toolchain("nRF52", _TOOLCHAINS, Toolchain.SDK_NRF)
 
 
+def _check_min_sdk_version(config: ConfigType, minimum: str) -> None:
+    if CORE.using_toolchain_platformio:
+        raise cv.Invalid(
+            f"{get_nrf52_variant()} is not supported by PlatformIO",
+            path=[CONF_TOOLCHAIN],
+        )
+    if (version := config[CONF_FRAMEWORK].get(CONF_VERSION)) is not None and (
+        cv.Version.parse(cv.version_number(version)) < cv.Version.parse(minimum)
+    ):
+        raise cv.Invalid(
+            f"{get_nrf52_variant()} needs sdk-nrf {minimum} or newer",
+            path=[CONF_FRAMEWORK, CONF_VERSION],
+        )
+
+
 def set_framework(config: ConfigType) -> ConfigType:
+    minimum = MIN_SDK_NRF_VERSIONS.get(get_nrf52_variant())
+    if minimum is not None:
+        _check_min_sdk_version(config, minimum)
     if CONF_VERSION not in config[CONF_FRAMEWORK]:
         default_version = (
             RECOMMENDED_PLATFORMIO_VERSION
             if CORE.using_toolchain_platformio
             else RECOMMENDED_SDK_NRF_VERSION
         )
+        if minimum is not None:
+            default_version = max(default_version, minimum, key=cv.Version.parse)
         config = {
             **config,
             CONF_FRAMEWORK: {**config[CONF_FRAMEWORK], CONF_VERSION: default_version},
@@ -200,6 +250,12 @@ BOOTLOADERS = [
 _validate_toolchain = cv.toolchain_enum(_TOOLCHAINS)
 
 
+def _resolve_board_alias(config: ConfigType) -> ConfigType:
+    if (board := BOARD_ALIASES.get(config.get(CONF_BOARD))) is not None:
+        return {**config, CONF_BOARD: board}
+    return config
+
+
 def _detect_bootloader(config: ConfigType) -> ConfigType:
     """Detect the bootloader for the given board."""
     config = config.copy()
@@ -209,6 +265,8 @@ def _detect_bootloader(config: ConfigType) -> ConfigType:
     if board in BOARDS_ZEPHYR and KEY_BOOTLOADER in BOARDS_ZEPHYR[board]:
         # this board have bootloaders config available
         bootloaders = BOARDS_ZEPHYR[board][KEY_BOOTLOADER]
+    if _board_variant(board) == VARIANT_NRF54L15:
+        bootloaders = [BOOTLOADER_MCUBOOT]
 
     if KEY_BOOTLOADER not in config:
         if bootloaders:
@@ -232,6 +290,9 @@ CONF_DCDC = "dcdc"
 CONF_LIBC_NANO = "libc_nano"
 CONF_REG0 = "reg0"
 CONF_UICR_ERASE = "uicr_erase"
+CONF_LFCLK_SOURCE = "lfclk_source"
+CONF_NFCT_PINS_AS_GPIOS = "nfct_pins_as_gpios"
+CONF_DK_PERIPHERALS = "dk_peripherals"
 
 VOLTAGE_LEVELS = [1.8, 2.1, 2.4, 2.7, 3.0, 3.3]
 
@@ -253,6 +314,7 @@ def _dfu_schema(value: bool | ConfigType) -> ConfigType:
 
 
 CONFIG_SCHEMA = cv.All(
+    _resolve_board_alias,
     _detect_bootloader,
     set_core_data,
     cv.Schema(
@@ -263,6 +325,9 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(KEY_BOOTLOADER): cv.one_of(*BOOTLOADERS, lower=True),
             cv.Optional(CONF_DFU): _dfu_schema,
             cv.Optional(CONF_DCDC): cv.boolean,
+            cv.Optional(CONF_LFCLK_SOURCE): cv.one_of("rc", "xtal", lower=True),
+            cv.Optional(CONF_NFCT_PINS_AS_GPIOS, default=True): cv.boolean,
+            cv.Optional(CONF_DK_PERIPHERALS, default=True): cv.boolean,
             cv.Optional(CONF_REG0): cv.Schema(
                 {
                     cv.Required(CONF_VOLTAGE): cv.All(
@@ -314,6 +379,8 @@ def _final_validate(config):
             "Please use 'toolchain: sdk-nrf' instead."
         )
 
+    if get_nrf52_variant() == VARIANT_NRF54L15 and CONF_REG0 in config:
+        raise cv.Invalid("nRF54L15 does not have the nRF52840 REG0 voltage setting")
     if CONF_DFU in config:
         _validate_mcumgr(config)
     if (
@@ -363,6 +430,94 @@ def _final_validate(config):
 FINAL_VALIDATE_SCHEMA = _final_validate
 
 
+def _nrf54l15_memory_overlay() -> str:
+    """Reclaim the unused FLPR memory, as Nordic's Matter sample does."""
+    return """
+        &cpuapp_rram { reg = <0x0 0x17d000>; };
+        &cpuapp_sram {
+            reg = <0x20000000 0x40000>;
+            ranges = <0x0 0x20000000 0x40000>;
+        };
+    """
+
+
+def _mcuboot_nrf54l15_to_code() -> None:
+    """Configure hash-only, overwrite-only updates in the full RRAM."""
+    zephyr_add_prj_conf("BOOTLOADER_MCUBOOT", True)
+    zephyr_add_prj_conf("BUILD_OUTPUT_UF2", False)
+    zephyr_data()[KEY_SYSBUILD] = True
+    zephyr_add_sysbuild_conf("BOOT_SIGNATURE_TYPE_NONE", True)
+    zephyr_add_sysbuild_conf("MCUBOOT_MODE_OVERWRITE_ONLY", True)
+    zephyr_add_sysbuild_conf("PM_MCUBOOT_PAD", HexValue(NRF54L15_IMAGE_HEADER_SIZE))
+    zephyr_add_pm_static(
+        [
+            Section("mcuboot", 0, NRF54L15_MCUBOOT_SIZE, "flash_primary"),
+            Section("mcuboot_secondary", 0xC2000, NRF54L15_SLOT_SIZE, "flash_primary"),
+            Section("settings_storage", 0x174000, NRF54L15_SETTINGS_SIZE, "flash_primary"),
+        ]
+    )
+    add_extra_build_file(
+        "zephyr/sysbuild/mcuboot.conf",
+        Path(__file__).parent / "mcuboot_nrf54l15.conf",
+    )
+    partitions = """
+        &cpuapp_rram {
+            /delete-node/ partitions;
+            partitions {
+                compatible = "fixed-partitions";
+                #address-cells = <1>;
+                #size-cells = <1>;
+                boot_partition: partition@0 {
+                    label = "mcuboot";
+                    reg = <0x0 0x10000>;
+                };
+                slot0_partition: partition@10000 {
+                    label = "image-0";
+                    reg = <0x10000 0xb2000>;
+                };
+                slot1_partition: partition@c2000 {
+                    label = "image-1";
+                    reg = <0xc2000 0xb2000>;
+                };
+                storage_partition: partition@174000 {
+                    label = "storage";
+                    reg = <0x174000 0x9000>;
+                };
+            };
+        };
+    """
+    for image in ("", "mcuboot"):
+        zephyr_add_overlay(partitions, image=image)
+    zephyr_add_prj_conf("SETTINGS_ZMS_SECTOR_SIZE_MULT", 1)
+    zephyr_add_prj_conf("SETTINGS_ZMS_SECTOR_COUNT", 9)
+
+
+def _nrf54l15_board_to_code(config: ConfigType) -> None:
+    for image in ("", "mcuboot"):
+        zephyr_add_overlay(_nrf54l15_memory_overlay(), image=image)
+        if not config[CONF_DK_PERIPHERALS]:
+            zephyr_add_overlay(
+                (Path(__file__).parent / "nrf54l15dk_module.overlay").read_text(),
+                image=image,
+            )
+        if config[CONF_NFCT_PINS_AS_GPIOS]:
+            zephyr_add_overlay("&uicr { nfct-pins-as-gpios; };", image=image)
+        if source := config.get(CONF_LFCLK_SOURCE):
+            zephyr_add_prj_conf("CLOCK_CONTROL_NRF_K32SRC_RC", source == "rc", image=image)
+            zephyr_add_prj_conf("CLOCK_CONTROL_NRF_K32SRC_XTAL", source == "xtal", image=image)
+            if source == "rc":
+                zephyr_add_prj_conf("CLOCK_CONTROL_NRF_K32SRC_RC_CALIBRATION", True, image=image)
+                zephyr_add_prj_conf("CLOCK_CONTROL_NRF_K32SRC_250PPM", True, image=image)
+                zephyr_add_overlay("""
+                    &lfxo {
+                        status = "disabled";
+                        /delete-property/ load-capacitors;
+                        /delete-property/ load-capacitance-femtofarad;
+                    };
+                """, image=image)
+    zephyr_add_overlay('&wdt31 { status = "okay"; };')
+
+
 def _mcuboot_to_code() -> None:
     """Configure a two-slot MCUboot that owns the device from the reset vector.
 
@@ -385,6 +540,9 @@ def _mcuboot_to_code() -> None:
     sizes the two application slots first and hands settings_storage whatever
     remains -- a single 0x2000, the bare two sectors Zephyr NVS will accept.
     """
+    if get_nrf52_variant() == VARIANT_NRF54L15:
+        _mcuboot_nrf54l15_to_code()
+        return
     slot_size = (
         NRF52840_FLASH_SIZE - MCUBOOT_PARTITION_SIZE - SETTINGS_PARTITION_SIZE
     ) // 2
@@ -483,7 +641,14 @@ async def to_code(config: ConfigType) -> None:
     """Convert the configuration to code."""
     cg.add_build_flag("-DUSE_NRF52")
     cg.add_define("ESPHOME_BOARD", config[CONF_BOARD])
-    cg.add_define("ESPHOME_VARIANT", "NRF52")
+    variant = get_nrf52_variant()
+    cg.add_define("ESPHOME_VARIANT", "NRF52" if variant == VARIANT_NRF52840 else variant)
+    if variant in (VARIANT_NRF54L15, VARIANT_NRF54LM20):
+        cg.add_build_flag(f"-DUSE_NRF52_VARIANT_{variant}")
+        if variant == VARIANT_NRF54L15:
+            _nrf54l15_board_to_code(config)
+        else:
+            zephyr_add_overlay('&wdt31 { status = "okay"; };')
     # nRF52 processors are single-core
     cg.add_define(ThreadModel.SINGLE)
     if CORE.using_toolchain_platformio:
@@ -538,9 +703,10 @@ async def to_code(config: ConfigType) -> None:
         if framework_ver < cv.Version(2, 9, 2):
             zephyr_add_prj_conf("BOARD_ENABLE_DCDC", config[CONF_DCDC])
         else:
+            reg = "vregmain" if variant == VARIANT_NRF54L15 else "reg1"
             zephyr_add_overlay(
                 f"""
-                    &reg1 {{
+                    &{reg} {{
                         regulator-initial-mode = <{"NRF5X_REG_MODE_DCDC" if config[CONF_DCDC] else "NRF5X_REG_MODE_LDO"}>;
                     }};
                 """
@@ -573,17 +739,17 @@ async def to_code(config: ConfigType) -> None:
     # disable console
     zephyr_add_prj_conf("UART_CONSOLE", False)
     zephyr_add_prj_conf("CONSOLE", False, False)
-    # use NFC pins as GPIO
-    if framework_ver < cv.Version(2, 9, 2):
-        zephyr_add_prj_conf("NFCT_PINS_AS_GPIOS", True)
-    else:
-        zephyr_add_overlay(
-            """
-                &uicr {
-                    nfct-pins-as-gpios;
-                };
-            """
-        )
+    if variant != VARIANT_NRF54L15:
+        if framework_ver < cv.Version(2, 9, 2):
+            zephyr_add_prj_conf("NFCT_PINS_AS_GPIOS", True)
+        else:
+            zephyr_add_overlay(
+                """
+                    &uicr {
+                        nfct-pins-as-gpios;
+                    };
+                """
+            )
     zephyr_add_prj_conf("REBOOT", True)
 
 
@@ -797,6 +963,10 @@ def upload_program(config: ConfigType, args, host: str) -> bool:
                 if result != 0:
                     raise EsphomeError(f"Upload failed with result: {result}")
             return True  # Handled: serial upload
+
+    if host == "JLINK":
+        upload_using_jlink()
+        return True
 
     if host == "PYOCD":
         if not CORE.using_toolchain_platformio:

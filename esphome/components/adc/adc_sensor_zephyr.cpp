@@ -109,8 +109,10 @@ static const LogString *input_to_str(uint8_t input) {
       return LOG_STR("AIN7");
     case NRF_SAADC_INPUT_VDD:
       return LOG_STR("VDD");
+#if !defined(CONFIG_SOC_NRF54L15_CPUAPP)
     case NRF_SAADC_INPUT_VDDHDIV5:
       return LOG_STR("VDDHDIV5");
+#endif
   }
   return LOG_STR("undefined input");
 }

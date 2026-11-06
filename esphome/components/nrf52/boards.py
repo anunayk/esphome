@@ -58,3 +58,8 @@ BOOTLOADER_CONFIG = {
         Section("Adafruit_nRF52_Bootloader", 0xF4000, 0xC000, "flash_primary"),
     ],
 }
+
+BOARD_ALIASES = {
+    "nrf54lm20dk": "nrf54lm20dk/nrf54lm20a/cpuapp",
+    "nrf54l15dk": "nrf54l15dk/nrf54l15/cpuapp",
+}
