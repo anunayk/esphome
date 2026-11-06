@@ -11,14 +11,28 @@ from esphome.const import (
     PLATFORM_NRF52,
 )
 
-from .const import AIN_TO_GPIO, EXTRA_ADC
+from .const import (
+    AIN_TO_GPIO,
+    EXTRA_ADC,
+    NRF54L15_AIN_TO_GPIO,
+    VARIANT_NRF54L15,
+    VARIANT_PORT_PINS,
+)
+from .framework import get_nrf52_variant
+
+
+def analog_pin_map() -> dict[str, int]:
+    if get_nrf52_variant() == VARIANT_NRF54L15:
+        return NRF54L15_AIN_TO_GPIO
+    return AIN_TO_GPIO
+
 
 ZephyrGPIOPin = zephyr_ns.class_("ZephyrGPIOPin", cg.InternalGPIOPin)
 
 
 def _translate_pin(value):
-    if value in AIN_TO_GPIO:
-        return AIN_TO_GPIO[value]
+    if value in analog_pin_map():
+        return analog_pin_map()[value]
     if isinstance(value, dict) or value is None:
         raise cv.Invalid(
             "This variable only supports pin numbers, not full pin schemas "
@@ -39,11 +53,16 @@ def _translate_pin(value):
 
 
 def validate_gpio_pin(value):
+    if value == "VDDHDIV5" and get_nrf52_variant() == VARIANT_NRF54L15:
+        raise cv.Invalid("nRF54L15 does not support VDDHDIV5")
     if value in EXTRA_ADC:
         return value
     value = _translate_pin(value)
-    if value < 0 or value > (32 + 16):
-        raise cv.Invalid(f"NRF52: Invalid pin number: {value}")
+    variant = get_nrf52_variant()
+    port_pins = VARIANT_PORT_PINS[variant]
+    port, pin = divmod(value, 32)
+    if value < 0 or port >= len(port_pins) or pin >= port_pins[port]:
+        raise cv.Invalid(f"{variant}: Invalid pin number: {value}")
     return value
 
 
@@ -54,7 +73,7 @@ def validate_supports(value):
     if is_analog:
         if num in EXTRA_ADC:
             return value
-        if num not in AIN_TO_GPIO.values():
+        if num not in analog_pin_map().values():
             raise cv.Invalid(f"Cannot use {num} as analog pin")
     return value
 
