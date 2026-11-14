@@ -11,9 +11,7 @@ namespace esphome::sha256 {
 
 #if defined(USE_SHA256_PSA)
 
-// ESP-IDF 6.0 ships mbedtls 4.0 which removed the legacy mbedtls_sha256_* API.
-// Use the PSA Crypto API instead. PSA crypto is auto-initialized by ESP-IDF
-// at startup, so no psa_crypto_init() call is needed.
+// ESP-IDF and NCS initialize PSA Crypto before the application starts.
 
 SHA256::~SHA256() { psa_hash_abort(&this->op_); }
 

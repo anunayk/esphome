@@ -174,7 +174,7 @@ def run_cmd(tmp_path: Path) -> Mock:
     with (
         patch.dict("os.environ", {}, clear=True),
         patch.object(nrf52, "check_and_install"),
-        patch.object(nrf52, "_generate_cmake_lists", return_value=False),
+        patch.object(nrf52, "_generate_cmake_lists", return_value=(False, [])),
         patch.object(
             nrf52,
             "get_build_paths",

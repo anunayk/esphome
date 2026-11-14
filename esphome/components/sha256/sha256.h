@@ -31,10 +31,12 @@
 #elif defined(USE_HOST)
 #include <openssl/evp.h>
 #elif defined(USE_ZEPHYR)
-// Zephyr/nRF52 has no mbedTLS/PSA in the default build; use the bundled TinyCrypt
-// SHA256 (enabled via CONFIG_TINYCRYPT_SHA256 from the component's to_code).
+#if defined(USE_SHA256_PSA)
+#include <psa/crypto.h>
+#else
 #define USE_SHA256_TINYCRYPT
 #include <tinycrypt/sha256.h>
+#endif
 #else
 #error "SHA256 not supported on this platform"
 #endif
