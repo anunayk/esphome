@@ -138,7 +138,9 @@ void SX126x::configure() {
 
   // config tcxo
   if (this->tcxo_voltage_ != TCXO_CTRL_NONE) {
-    uint32_t delay = this->tcxo_delay_ >> 6;
+    // SetDIO3AsTCXOCtrl uses 15.625 us units. Round up, then limit the delay to 24 bits.
+    uint32_t delay = (static_cast<uint64_t>(this->tcxo_delay_) * 64 + 999) / 1000;
+    delay = std::min<uint32_t>(delay, 0xFFFFFF);
     buf[0] = this->tcxo_voltage_;
     buf[1] = (delay >> 16) & 0xFF;
     buf[2] = (delay >> 8) & 0xFF;
