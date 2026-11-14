@@ -18,6 +18,7 @@ from esphome.components.nrf52.framework import (
     _get_penv_site_packages,
     _get_platformio_penv_path,
     _get_toolchain_platform_info,
+    _get_toolchain_version,
     _needs_venv_rebuild,
     check_and_install,
     get_build_env,
@@ -79,13 +80,14 @@ _TEST_SDK_VERSION = "2.9.0"
 
 
 @pytest.fixture
-def nrf52_dirs(setup_core: Path) -> SimpleNamespace:
+def nrf52_dirs(setup_core: Path, request: pytest.FixtureRequest) -> SimpleNamespace:
     """Populate CORE and pre-create SDK directories so sentinel.touch() succeeds."""
-    CORE.data[KEY_CORE] = {KEY_FRAMEWORK_VERSION: Version.parse(_TEST_SDK_VERSION)}
+    sdk_version = getattr(request, "param", _TEST_SDK_VERSION)
+    CORE.data[KEY_CORE] = {KEY_FRAMEWORK_VERSION: Version.parse(sdk_version)}
     tools = get_sdk_nrf_tools_path()
-    python_env = tools / "penvs" / f"v{_TEST_SDK_VERSION}"
-    framework = tools / "frameworks" / f"v{_TEST_SDK_VERSION}"
-    toolchain_dir = tools / "toolchains" / TOOLCHAIN_VERSION
+    python_env = tools / "penvs" / f"v{sdk_version}"
+    framework = tools / "frameworks" / f"v{sdk_version}"
+    toolchain_dir = tools / "toolchains" / _get_toolchain_version()
     for d in (python_env, framework, toolchain_dir):
         d.mkdir(parents=True, exist_ok=True)
     zephyr_scripts = framework / "zephyr" / "scripts"
@@ -287,6 +289,7 @@ class TestCheckAndInstall:
         with pytest.raises(EsphomeError, match="Can't update"):
             check_and_install()
 
+    @pytest.mark.parametrize("nrf52_dirs", ["2.9.0", "3.4.1"], indirect=True)
     def test_toolchain_download_passes_platform_substitutions(
         self,
         nrf52_dirs: SimpleNamespace,
@@ -304,10 +307,21 @@ class TestCheckAndInstall:
 
         args, _ = mock_nrf52_ops.download_from_mirrors.call_args
         substitutions = args[1]
-        assert substitutions["VERSION"] == TOOLCHAIN_VERSION
+        assert substitutions["VERSION"] == nrf52_dirs.toolchain.name
+        modern = nrf52_dirs.toolchain.name == "1.0.0"
+        assert substitutions["compiler"] == ("gnu_" if modern else "")
+        toolchain_url = args[0][0].format(**substitutions)
+        filename = f"toolchain_{'gnu_' if modern else ''}linux-x86_64_arm-zephyr-eabi.tar.xz"
+        assert toolchain_url.endswith(filename)
         assert substitutions["sysname"] == "linux"
         assert substitutions["machine"] == "x86_64"
         assert substitutions["extension"] == "tar.xz"
+        extract_dir = mock_nrf52_ops.archive_extract_all.call_args.args[1]
+        assert extract_dir == (
+            nrf52_dirs.toolchain / "gnu" / "arm-zephyr-eabi"
+            if modern
+            else nrf52_dirs.toolchain / "arm-zephyr-eabi"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -510,6 +524,7 @@ def test_get_penv_site_packages(
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.parametrize("nrf52_dirs", ["2.9.0", "3.4.1"], indirect=True)
 def test_get_build_env(
     nrf52_dirs: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -524,18 +539,12 @@ def test_get_build_env(
 
     env = get_build_env()
 
-    tools = get_sdk_nrf_tools_path()
     venv_bin_dir = get_python_env_executable_path(
-        tools / "penvs" / f"v{_TEST_SDK_VERSION}", "python"
+        nrf52_dirs.python_env, "python"
     ).parent
     assert env["PATH"].startswith(str(venv_bin_dir) + os.pathsep)
-    assert env["ZEPHYR_BASE"] == str(
-        tools / "frameworks" / f"v{_TEST_SDK_VERSION}" / "zephyr"
-    )
-    # Toolchain root, not the cmake/ subdir
-    assert env["ZEPHYR_SDK_INSTALL_DIR"] == str(
-        tools / "toolchains" / TOOLCHAIN_VERSION
-    )
+    assert env["ZEPHYR_BASE"] == str(nrf52_dirs.framework / "zephyr")
+    assert env["ZEPHYR_SDK_INSTALL_DIR"] == str(nrf52_dirs.toolchain)
     assert "Zephyr-sdk_DIR" not in env
     # The rest of the process environment is inherited
     assert env["SOME_PREEXISTING_VAR"] == "kept"

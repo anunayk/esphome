@@ -28,6 +28,8 @@ from esphome.const import (
     CONF_SECONDS,
     CONF_TIMEZONE,
     CONF_TRIGGER_ID,
+    KEY_CORE,
+    KEY_FRAMEWORK_VERSION,
     PLATFORM_BK72XX,
     PLATFORM_ESP32,
     PLATFORM_ESP8266,
@@ -464,15 +466,12 @@ async def register_time(time_var, config):
 @coroutine_with_priority(CoroPriority.CORE)
 async def to_code(config):
     if CORE.using_zephyr:
-        from esphome.components.nrf52.const import VARIANT_NRF54L15
-        from esphome.components.nrf52.framework import get_nrf52_variant
-
-        option = (
-            "POSIX_TIMERS"
-            if get_nrf52_variant() == VARIANT_NRF54L15
-            else "POSIX_CLOCK"
-        )
-        zephyr_add_prj_conf(option, True)
+        if CORE.data[KEY_CORE][KEY_FRAMEWORK_VERSION] >= cv.Version(3, 4, 1):
+            zephyr_add_prj_conf("POSIX_SYSTEM_INTERFACES", True)
+            zephyr_add_prj_conf("POSIX_TIMERS", True)
+            zephyr_add_prj_conf("XSI_SINGLE_PROCESS", True)
+        else:
+            zephyr_add_prj_conf("POSIX_CLOCK", True)
     cg.add_define("USE_TIME")
     cg.add_global(time_ns.using)
 

@@ -46,7 +46,7 @@ _PLATFORMIO_PENV_REQUIREMENTS: tuple[str, ...] = ("cbor2==5.6.5",)
 SDK_NG_TOOLCHAIN_MIRRORS = str_to_lst_of_str(
     os.environ.get(
         "ESPHOME_SDK_NG_TOOLCHAIN_MIRRORS",
-        "https://github.com/zephyrproject-rtos/sdk-ng/releases/download/v{VERSION}/toolchain_{sysname}-{machine}_arm-zephyr-eabi.{extension}",
+        "https://github.com/zephyrproject-rtos/sdk-ng/releases/download/v{VERSION}/toolchain_{compiler}{sysname}-{machine}_arm-zephyr-eabi.{extension}",
     )
 )
 
@@ -142,6 +142,12 @@ def _get_version_str() -> str:
     return f"v{framework_ver.major}.{framework_ver.minor}.{framework_ver.patch}"
 
 
+def _get_toolchain_version() -> str:
+    if CORE.data[KEY_CORE][KEY_FRAMEWORK_VERSION] >= cv.Version(3, 4, 1):
+        return "1.0.0"
+    return TOOLCHAIN_VERSION
+
+
 def get_build_paths() -> dict:
     version = _get_version_str()
     env_path = _get_python_env_path(version)
@@ -167,7 +173,7 @@ def get_build_env() -> dict:
     # "Zephyr-sdk_DIR" environment hint proved unreliable here: containerized
     # non-root builds failed to locate the SDK with it, while
     # ZEPHYR_SDK_INSTALL_DIR fixed the same invocation.
-    env["ZEPHYR_SDK_INSTALL_DIR"] = str(_get_toolchain_path(TOOLCHAIN_VERSION))
+    env["ZEPHYR_SDK_INSTALL_DIR"] = str(_get_toolchain_path(_get_toolchain_version()))
     return env
 
 
@@ -345,13 +351,15 @@ def check_and_install() -> None:
             raise EsphomeError(f"Install Zephyr requirements for {version} failure")
         zephyr_sentinel.touch()
 
-    toolchains_dir = _get_toolchain_path(TOOLCHAIN_VERSION)
+    toolchain_version = _get_toolchain_version()
+    toolchains_dir = _get_toolchain_path(toolchain_version)
     sentinel = toolchains_dir / ".ready"
     if not sentinel.exists():
-        rmdir(toolchains_dir, msg=f"Clean up {TOOLCHAIN_VERSION} toolchain environment")
+        rmdir(toolchains_dir, msg=f"Clean up {toolchain_version} toolchain environment")
         sysname, machine, extension = _get_toolchain_platform_info()
         substitutions = {
-            "VERSION": TOOLCHAIN_VERSION,
+            "VERSION": toolchain_version,
+            "compiler": "gnu_" if toolchain_version == "1.0.0" else "",
             "sysname": sysname,
             "machine": machine,
             "extension": extension,
@@ -362,12 +370,14 @@ def check_and_install() -> None:
             (SDK_NG_MINIMAL_MIRRORS, toolchains_dir, "Zephyr SDK minimal", "minimal"),
             (
                 SDK_NG_TOOLCHAIN_MIRRORS,
-                toolchains_dir / "arm-zephyr-eabi",
+                toolchains_dir / "gnu" / "arm-zephyr-eabi"
+                if toolchain_version == "1.0.0"
+                else toolchains_dir / "arm-zephyr-eabi",
                 "toolchain",
                 "toolchain",
             ),
         ):
-            _LOGGER.info("Downloading %s %s ...", TOOLCHAIN_VERSION, what)
+            _LOGGER.info("Downloading %s %s ...", toolchain_version, what)
             download_and_extract(
                 mirrors,
                 substitutions,

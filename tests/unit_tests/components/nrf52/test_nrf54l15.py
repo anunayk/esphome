@@ -48,7 +48,7 @@ def nrf54(setup_core: Path) -> dict:
     CORE.data[KEY_CORE] = {
         KEY_TARGET_PLATFORM: PLATFORM_NRF52,
         KEY_TARGET_FRAMEWORK: KEY_ZEPHYR,
-        KEY_FRAMEWORK_VERSION: cv.Version(2, 9, 2),
+        KEY_FRAMEWORK_VERSION: cv.Version(3, 4, 1),
     }
     config = nrf52.CONFIG_SCHEMA(
         {
@@ -62,30 +62,18 @@ def nrf54(setup_core: Path) -> dict:
     return config
 
 
-def test_rram_layout_and_header(nrf54: dict) -> None:
+def test_sdk_partitions_and_hash_only_updates(nrf54: dict) -> None:
     nrf52._mcuboot_to_code()
-    sections = {section.name: section for section in zephyr_data()[KEY_PM_STATIC]}
-    assert sections["mcuboot"].address == 0
-    assert sections["mcuboot"].end_address == 0x10000
-    assert sections["mcuboot_secondary"].address == 0xC2000
-    assert sections["mcuboot_secondary"].size == 0xB2000
-    assert sections["settings_storage"].address == 0x174000
-    assert sections["settings_storage"].end_address == 0x17D000
-    assert 0xC2000 - 0x10000 == sections["mcuboot_secondary"].size
+    assert not zephyr_data()[KEY_PM_STATIC]
     conf = zephyr_data()[KEY_SYSBUILD_CONF]
     assert conf["SB_CONFIG_BOOT_SIGNATURE_TYPE_NONE"] is True
     assert conf["SB_CONFIG_MCUBOOT_MODE_OVERWRITE_ONLY"] is True
-    assert conf["SB_CONFIG_PM_MCUBOOT_PAD"].value == 0x800
-    for image in ("", "mcuboot"):
-        overlay = zephyr_data()[KEY_OVERLAY][image]
-        assert "&cpuapp_rram" in overlay
-        assert "/delete-node/ partitions" in overlay
-        assert "partition@10000" in overlay
-        assert "partition@c2000" in overlay
-        assert "partition@174000" in overlay
-        assert "zephyr_udc0" not in overlay
-    kconfig = zephyr_data()[KEY_EXTRA_BUILD_FILES]["zephyr/Kconfig.sysbuild"]
-    assert "config MCUBOOT_FPROTECT_ALLOW_COMBINED_REGIONS\n\tdefault n" in kconfig.read_text()
+    assert "SB_CONFIG_PM_MCUBOOT_PAD" not in conf
+    assert "zephyr/Kconfig.sysbuild" not in zephyr_data()[KEY_EXTRA_BUILD_FILES]
+    for overlay in zephyr_data()[KEY_OVERLAY].values():
+        assert "/delete-node/ partitions" not in overlay
+        assert "slot0_partition" not in overlay
+    assert "zephyr,code-partition = &boot_partition" in zephyr_data()[KEY_OVERLAY]["mcuboot"]
     fragment = zephyr_data()[KEY_EXTRA_BUILD_FILES]["zephyr/sysbuild/mcuboot/prj.conf"]
     assert "CONFIG_MCUBOOT_SERIAL=n" in fragment.read_text()
     assert "CONFIG_NCS_BOOT_BANNER=n" in fragment.read_text()
@@ -141,7 +129,7 @@ def test_nrf54_rejects_old_adc_supply_input(nrf54: dict) -> None:
 
 
 def test_nrf54_sdk_and_bootloader(nrf54: dict) -> None:
-    assert nrf54["framework"]["version"] == "2.9.2"
+    assert nrf54["framework"]["version"] == "3.4.1"
     with pytest.raises(cv.Invalid, match="does not support"):
         nrf52._detect_bootloader({"board": nrf54["board"], "bootloader": "adafruit"})
 
@@ -302,16 +290,72 @@ def test_nus_ring_buffer_dependency(nrf54: dict, variant: str) -> None:
 
 
 @pytest.mark.parametrize(
-    "variant,option",
-    [(VARIANT_NRF54L15, "POSIX_TIMERS"), (VARIANT_NRF52840, "POSIX_CLOCK")],
+    "variant,version,option",
+    [
+        (VARIANT_NRF54L15, cv.Version(3, 4, 1), "POSIX_TIMERS"),
+        (VARIANT_NRF52840, cv.Version(2, 9, 2), "POSIX_CLOCK"),
+        (VARIANT_NRF52840, cv.Version(3, 4, 1), "POSIX_TIMERS"),
+    ],
 )
-def test_time_clock_option(nrf54: dict, variant: str, option: str) -> None:
+def test_time_clock_option(
+    nrf54: dict, variant: str, version: cv.Version, option: str
+) -> None:
     from esphome.components import time
 
     set_nrf52_variant(variant)
+    CORE.data[KEY_CORE][KEY_FRAMEWORK_VERSION] = version
     with (
         patch.object(time.cg, "add_define"),
         patch.object(time.cg, "add_global"),
     ):
         asyncio.run(time.to_code({}))
     assert zephyr_data()[KEY_PRJ_CONF][""][f"CONFIG_{option}"][0] is True
+    if version >= cv.Version(3, 4, 1):
+        assert zephyr_data()[KEY_PRJ_CONF][""]["CONFIG_POSIX_SYSTEM_INTERFACES"][0] is True
+        assert zephyr_data()[KEY_PRJ_CONF][""]["CONFIG_XSI_SINGLE_PROCESS"][0] is True
+
+
+@pytest.mark.parametrize("version", [cv.Version(2, 9, 2), cv.Version(3, 4, 1)])
+def test_libc_matches_sdk(nrf54: dict, version: cv.Version) -> None:
+    CORE.data[KEY_CORE][KEY_FRAMEWORK_VERSION] = version
+    set_nrf52_variant(VARIANT_NRF52840)
+    nrf54["framework"]["libc_nano"] = False
+    with (
+        patch.object(nrf52.cg, "add_build_flag"),
+        patch.object(nrf52.cg, "add_define"),
+        patch.object(nrf52, "_mcuboot_to_code"),
+        patch.object(nrf52, "zephyr_setup_preferences"),
+        patch.object(nrf52, "zephyr_to_code"),
+    ):
+        asyncio.run(nrf52.to_code(nrf54))
+    conf = zephyr_data()[KEY_PRJ_CONF][""]
+    if version >= cv.Version(3, 4, 1):
+        assert conf["CONFIG_PICOLIBC"][0] is True
+        assert conf["CONFIG_PICOLIBC_IO_FLOAT"][0] is True
+        assert "CONFIG_NEWLIB_LIBC" not in conf
+    else:
+        assert conf["CONFIG_NEWLIB_LIBC"][0] is True
+        assert conf["CONFIG_NEWLIB_LIBC_FLOAT_PRINTF"][0] is True
+        assert conf["CONFIG_NEWLIB_LIBC_NANO"][0] is False
+        assert "CONFIG_PICOLIBC" not in conf
+
+
+@pytest.mark.parametrize("version", [cv.Version(2, 9, 2), cv.Version(3, 4, 1)])
+def test_sha256_backend_matches_sdk(nrf54: dict, version: cv.Version) -> None:
+    from esphome.components import sha256
+
+    CORE.data[KEY_CORE][KEY_FRAMEWORK_VERSION] = version
+    with patch.object(sha256.cg, "add_define") as add_define:
+        asyncio.run(sha256.to_code({}))
+    conf = zephyr_data()[KEY_PRJ_CONF][""]
+    defines = [call.args[0] for call in add_define.call_args_list]
+    if version >= cv.Version(3, 4, 1):
+        assert "USE_SHA256_PSA" in defines
+        assert conf["CONFIG_PSA_CRYPTO"][0] is True
+        assert conf["CONFIG_PSA_WANT_ALG_SHA_256"][0] is True
+        assert "CONFIG_TINYCRYPT" not in conf
+    else:
+        assert "USE_SHA256_PSA" not in defines
+        assert conf["CONFIG_TINYCRYPT"][0] is True
+        assert conf["CONFIG_TINYCRYPT_SHA256"][0] is True
+        assert "CONFIG_PSA_CRYPTO" not in conf

@@ -68,6 +68,7 @@ def _set_framework(version: str | None) -> ConfigType:
 @pytest.mark.parametrize(
     ("variant", "default"),
     [
+        (VARIANT_NRF54L15, "3.4.1"),
         (VARIANT_NRF54LM20, "3.4.1"),
         (VARIANT_NRF52840, nrf52.RECOMMENDED_SDK_NRF_VERSION),
     ],
@@ -80,23 +81,26 @@ def test_default_sdk_version(variant: str, default: str) -> None:
 
 
 @pytest.mark.usefixtures("platformio")
+@pytest.mark.parametrize("variant", [VARIANT_NRF54L15, VARIANT_NRF54LM20])
 @pytest.mark.parametrize("version", ["3.4.1", "3.5.0"])
-def test_nrf54lm20_accepts_minimum_or_newer(version: str) -> None:
-    set_nrf52_variant(VARIANT_NRF54LM20)
+def test_nrf54_accepts_minimum_or_newer(variant: str, version: str) -> None:
+    set_nrf52_variant(variant)
     assert _set_framework(version)[CONF_FRAMEWORK][CONF_VERSION] == version
 
 
 @pytest.mark.usefixtures("platformio")
+@pytest.mark.parametrize("variant", [VARIANT_NRF54L15, VARIANT_NRF54LM20])
 @pytest.mark.parametrize("version", ["2.9.2", "3.4.0"])
-def test_nrf54lm20_rejects_older_sdk(version: str) -> None:
-    set_nrf52_variant(VARIANT_NRF54LM20)
+def test_nrf54_rejects_older_sdk(variant: str, version: str) -> None:
+    set_nrf52_variant(variant)
     with pytest.raises(cv.Invalid, match="needs sdk-nrf 3.4.1 or newer"):
         _set_framework(version)
 
 
-def test_nrf54lm20_rejects_platformio(platformio: PropertyMock) -> None:
+@pytest.mark.parametrize("variant", [VARIANT_NRF54L15, VARIANT_NRF54LM20])
+def test_nrf54_rejects_platformio(platformio: PropertyMock, variant: str) -> None:
     platformio.return_value = True
-    set_nrf52_variant(VARIANT_NRF54LM20)
+    set_nrf52_variant(variant)
     with pytest.raises(cv.Invalid, match="is not supported by PlatformIO"):
         _set_framework(None)
 

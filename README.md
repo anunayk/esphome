@@ -25,12 +25,18 @@ Variant pin validation now rejects the nonexistent nRF52840 pin P1.16.
 ### ISC-L1512-B configuration
 
 The `nrf52:` key also selects the nRF54L15.
+It requires NCS 3.4.1 or newer.
+Clean the build directory before upgrading an existing NCS 2.9.2 configuration.
+NCS reads the HFXO startup delay from devicetree to avoid the DRGN-25262 BLE assertion.
+NCS 3.4.1 uses Zephyr SDK 1.0.0 with Picolibc and full floating-point formatting.
+SHA-256 uses PSA Crypto on NCS 3.4.1 or newer.
+Older SDKs keep Newlib and TinyCrypt.
 The module profile disables the DK LEDs, buttons, PWM, external flash, and UART20.
 Bus components supply their own pin assignments.
 LFRC uses the internal low-frequency oscillator in both the application and MCUboot.
 The NFC GPIO property changes the nRF54L15 NFCT pad configuration without writing UICR.
 
-The NCS 2.9.2 DK files confirm the module pin conflicts.
+The NCS 3.4.1 DK files confirm the module pin conflicts.
 LED3 uses P1.14, button 0 uses P1.13, and button 2 uses P1.08.
 UART20 uses P1.04/P1.05 for TX/RX and P1.06/P1.07 for RTS/CTS.
 
@@ -50,7 +56,7 @@ nrf52:
   nfct_pins_as_gpios: true
   dk_peripherals: false
   framework:
-    version: 2.9.2
+    version: 3.4.1
     libc_nano: false
     advanced:
       enable_ota_rollback: false
@@ -99,16 +105,20 @@ Non-raw ADC values report volts.
 
 ### RRAM and updates
 
-Both images reclaim the unused FLPR memory, following the NCS 2.9.2 Matter light-bulb overlays.
+Both images reclaim the unused FLPR memory.
+NCS 3.4.1 supplies the devicetree partitions without Partition Manager.
 The physical RRAM size is 1524 KiB, not 1536 KiB.
 RAM spans `0x20000000` through exclusive end `0x20040000`.
 
 | Region | Start | Exclusive end | Size |
 | --- | --- | --- | --- |
-| MCUboot | `0x000000` | `0x010000` | 64 KiB |
+| MCUboot | `0x000000` | `0x00F800` | 62 KiB |
+| Reserved gap | `0x00F800` | `0x010000` | 2 KiB |
 | Primary image | `0x010000` | `0x0C2000` | 712 KiB |
 | Secondary image | `0x0C2000` | `0x174000` | 712 KiB |
 | ZMS settings | `0x174000` | `0x17D000` | 36 KiB |
+
+ZMS uses all nine storage sectors through the SDK automatic sector count.
 
 The image header is `0x800` bytes, so application vectors start at `0x10800`.
 RRAM writes use 16-byte blocks, and erase pages use 4096 bytes.
@@ -125,10 +135,9 @@ The first flash and recovery use SWD with J-Link.
 
 Sources:
 
-- [NCS 2.9.2 dependencies](https://github.com/nrfconnect/sdk-nrf/blob/v2.9.2/west.yml).
-- [DK pins](https://github.com/nrfconnect/sdk-zephyr/blob/v3.7.99-ncs2-2/boards/nordic/nrf54l15dk/nrf54l15dk_common.dtsi).
-- [Application memory reuse](https://github.com/nrfconnect/sdk-nrf/blob/v2.9.2/samples/matter/light_bulb/boards/nrf54l15dk_nrf54l15_cpuapp.overlay).
-- [MCUboot memory reuse](https://github.com/nrfconnect/sdk-nrf/blob/v2.9.2/samples/matter/light_bulb/sysbuild/mcuboot/boards/nrf54l15dk_nrf54l15_cpuapp.overlay).
-- [RRAM geometry](https://github.com/nrfconnect/sdk-zephyr/blob/v3.7.99-ncs2-2/dts/common/nordic/nrf54l_05_10_15.dtsi).
-- [MCUboot header padding](https://github.com/nrfconnect/sdk-nrf/blob/v2.9.2/modules/mcuboot/boot/zephyr/Kconfig).
+- [NCS 3.4.1 dependencies](https://github.com/nrfconnect/sdk-nrf/blob/v3.4.1/west.yml).
+- [DK pins](https://github.com/nrfconnect/sdk-zephyr/blob/ncs-v3.4.1/boards/nordic/nrf54l15dk/nrf54l15dk_common.dtsi).
+- [Default RRAM partitions](https://github.com/nrfconnect/sdk-zephyr/blob/ncs-v3.4.1/dts/vendor/nordic/nrf54l15_cpuapp_partition.dtsi).
+- [MCUboot header padding](https://github.com/nrfconnect/sdk-zephyr/blob/ncs-v3.4.1/soc/nordic/nrf54l/Kconfig.defconfig).
+- [MPSL clock startup delay](https://github.com/nrfconnect/sdk-nrf/blob/v3.4.1/subsys/mpsl/init/Kconfig).
 

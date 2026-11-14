@@ -1,5 +1,6 @@
 import esphome.codegen as cg
 import esphome.config_validation as cv
+from esphome.const import KEY_CORE, KEY_FRAMEWORK_VERSION
 from esphome.core import CORE
 from esphome.helpers import IS_MACOS
 from esphome.types import ConfigType
@@ -14,13 +15,16 @@ CONFIG_SCHEMA = cv.Schema({})
 async def to_code(config: ConfigType) -> None:
     cg.add_define("USE_SHA256")
 
-    # Zephyr/nRF52 has no mbedTLS/PSA in the default build; the SHA256 backend uses
-    # the bundled TinyCrypt, which must be enabled in the Zephyr config.
     if CORE.using_zephyr:
         from esphome.components.zephyr import zephyr_add_prj_conf
 
-        zephyr_add_prj_conf("TINYCRYPT", True)
-        zephyr_add_prj_conf("TINYCRYPT_SHA256", True)
+        if CORE.data[KEY_CORE][KEY_FRAMEWORK_VERSION] >= cv.Version(3, 4, 1):
+            cg.add_define("USE_SHA256_PSA")
+            zephyr_add_prj_conf("PSA_CRYPTO", True)
+            zephyr_add_prj_conf("PSA_WANT_ALG_SHA_256", True)
+        else:
+            zephyr_add_prj_conf("TINYCRYPT", True)
+            zephyr_add_prj_conf("TINYCRYPT_SHA256", True)
         return
 
     # Add OpenSSL library for host platform

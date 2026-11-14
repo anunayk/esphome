@@ -3,7 +3,11 @@
 #ifdef USE_HOST
 #include <sys/time.h>
 #elif defined(USE_ZEPHYR)
+#ifdef CONFIG_POSIX_SYSTEM_INTERFACES
+#include <time.h>
+#else
 #include <zephyr/posix/time.h>
+#endif
 #else
 #include "lwip/opt.h"
 #endif
