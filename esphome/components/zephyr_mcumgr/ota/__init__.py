@@ -205,7 +205,10 @@ async def to_code(config: ConfigType) -> None:
         zephyr_add_prj_conf("MCUMGR_TRANSPORT_BT_REASSEMBLY", True)
         # Ask for a short connection interval while SMP commands run. The stack
         # restores the peripheral preferences after 5 s without SMP traffic.
+        # The 420 ms default supervision timeout dropped links to an ESP32 central
+        # that shares its radio with Wi-Fi. Use 4 s (units of 10 ms).
         zephyr_add_prj_conf("MCUMGR_TRANSPORT_BT_CONN_PARAM_CONTROL", True)
+        zephyr_add_prj_conf("MCUMGR_TRANSPORT_BT_CONN_PARAM_CONTROL_TIMEOUT", 400)
 
         zephyr_add_prj_conf("NCS_SAMPLE_MCUMGR_BT_OTA_DFU_SPEEDUP", True)
         request_ble_l2cap_mtu(498)  # matches NCS_SAMPLE_MCUMGR_BT_OTA_DFU_SPEEDUP
