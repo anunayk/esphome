@@ -113,8 +113,12 @@ void BLEServer::disconnected(bt_conn *conn, uint8_t reason) {
       global_ble_server->conn_ = nullptr;
     }
   });
-  k_work_submit(&advertise_work);
 }
+
+// Restart advertising when the stack frees the connection object, not on disconnect.
+// With BT_LE_ADV_OPT_CONN (NCS 3.x), the stack does not resume advertising itself, and a
+// start from the disconnected callback fails while the connection object is still in use.
+static void recycled() { k_work_submit(&advertise_work); }
 
 #ifdef CONFIG_BT_SMP
 static void identity_resolved(bt_conn *conn, const bt_addr_le_t *rpa, const bt_addr_le_t *identity) {
@@ -239,6 +243,7 @@ void BLEServer::setup() {
   static bt_conn_cb conn_callbacks = {
       .connected = connected,
       .disconnected = disconnected,
+      .recycled = recycled,
 #ifdef CONFIG_BT_SMP
       .identity_resolved = identity_resolved,
       .security_changed = security_changed,
