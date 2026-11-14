@@ -29,7 +29,11 @@ static const bt_data SD[] = {
 #endif
 };
 
+#ifdef BT_LE_ADV_CONN_FAST_2
+const bt_le_adv_param *const ADV_PARAM = BT_LE_ADV_CONN_FAST_2;
+#else
 const bt_le_adv_param *const ADV_PARAM = BT_LE_ADV_CONN;
+#endif
 
 // Last bt_le_adv_start() rc, surfaced in dump_config() because advertise() runs on
 // the BT workqueue thread whose logs don't reliably flush over USB-CDC. -255 means

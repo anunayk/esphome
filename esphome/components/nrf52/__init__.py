@@ -13,7 +13,6 @@ from esphome.build_helpers.ccache import resolve_ccache_path
 import esphome.codegen as cg
 from esphome.components import network
 from esphome.components.zephyr import (
-    HexValue,
     Section,
     add_extra_build_file,
     add_extra_script,
@@ -117,7 +116,7 @@ _LOGGER = logging.getLogger(__name__)
 RECOMMENDED_PLATFORMIO_VERSION = "2.6.1-b"
 RECOMMENDED_SDK_NRF_VERSION = "2.9.2"
 MIN_SDK_NRF_VERSIONS = {
-    VARIANT_NRF54L15: "2.9.2",
+    VARIANT_NRF54L15: "3.4.1",
     VARIANT_NRF54LM20: "3.4.1",
 }
 
@@ -136,11 +135,6 @@ FLASH_SECTOR_SIZE = 0x1000
 MCUBOOT_PARTITION_SIZE = 0x10000
 # Zephyr NVS, behind esphome's preferences.
 SETTINGS_PARTITION_SIZE = 0xA000
-NRF54L15_RRAM_SIZE = 0x17D000
-NRF54L15_MCUBOOT_SIZE = 0x10000
-NRF54L15_SLOT_SIZE = 0xB2000
-NRF54L15_SETTINGS_SIZE = 0x9000
-NRF54L15_IMAGE_HEADER_SIZE = 0x800
 
 FAKE_BOARD_MANIFEST = """
 {
@@ -535,55 +529,21 @@ def _nrf54l15_memory_overlay() -> str:
 
 
 def _mcuboot_nrf54l15_to_code() -> None:
-    """Configure hash-only, overwrite-only updates in the full RRAM."""
+    """Use the SDK partitions for hash-only, overwrite-only updates."""
     zephyr_add_prj_conf("BOOTLOADER_MCUBOOT", True)
     zephyr_add_prj_conf("BUILD_OUTPUT_UF2", False)
     zephyr_data()[KEY_SYSBUILD] = True
     zephyr_add_sysbuild_conf("BOOT_SIGNATURE_TYPE_NONE", True)
     zephyr_add_sysbuild_conf("MCUBOOT_MODE_OVERWRITE_ONLY", True)
-    zephyr_add_sysbuild_conf("PM_MCUBOOT_PAD", HexValue(NRF54L15_IMAGE_HEADER_SIZE))
-    zephyr_add_sysbuild_conf("MCUBOOT_FPROTECT_ALLOW_COMBINED_REGIONS", False)
-    zephyr_add_pm_static(
-        [
-            Section("mcuboot", 0, NRF54L15_MCUBOOT_SIZE, "flash_primary"),
-            Section("mcuboot_secondary", 0xC2000, NRF54L15_SLOT_SIZE, "flash_primary"),
-            Section("settings_storage", 0x174000, NRF54L15_SETTINGS_SIZE, "flash_primary"),
-        ]
+    # The generated image overlay replaces MCUboot's default app.overlay.
+    zephyr_add_overlay(
+        "/ { chosen { zephyr,code-partition = &boot_partition; }; };",
+        image="mcuboot",
     )
     add_extra_build_file(
         "zephyr/sysbuild/mcuboot/prj.conf",
         Path(__file__).parent / "mcuboot_nrf54l15.conf",
     )
-    partitions = """
-        &cpuapp_rram {
-            /delete-node/ partitions;
-            partitions {
-                compatible = "fixed-partitions";
-                #address-cells = <1>;
-                #size-cells = <1>;
-                boot_partition: partition@0 {
-                    label = "mcuboot";
-                    reg = <0x0 0x10000>;
-                };
-                slot0_partition: partition@10000 {
-                    label = "image-0";
-                    reg = <0x10000 0xb2000>;
-                };
-                slot1_partition: partition@c2000 {
-                    label = "image-1";
-                    reg = <0xc2000 0xb2000>;
-                };
-                storage_partition: partition@174000 {
-                    label = "storage";
-                    reg = <0x174000 0x9000>;
-                };
-            };
-        };
-    """
-    for image in ("", "mcuboot"):
-        zephyr_add_overlay(partitions, image=image)
-    zephyr_add_prj_conf("SETTINGS_ZMS_SECTOR_SIZE_MULT", 1)
-    zephyr_add_prj_conf("SETTINGS_ZMS_SECTOR_COUNT", 9)
 
 
 def _nrf54l15_board_to_code(config: ConfigType) -> None:
@@ -835,12 +795,16 @@ async def to_code(config: ConfigType) -> None:
     # Enable OTA rollback support
     if advanced[CONF_ENABLE_OTA_ROLLBACK]:
         cg.add_define("USE_OTA_ROLLBACK")
-    zephyr_add_prj_conf("NEWLIB_LIBC", True)
-    zephyr_add_prj_conf("NEWLIB_LIBC_FLOAT_PRINTF", True)
-    zephyr_add_prj_conf(
-        "NEWLIB_LIBC_NANO",
-        conf.get(CONF_LIBC_NANO, "logger" not in CORE.loaded_integrations),
-    )
+    if framework_ver >= cv.Version(3, 4, 1):
+        zephyr_add_prj_conf("PICOLIBC", True)
+        zephyr_add_prj_conf("PICOLIBC_IO_FLOAT", True)
+    else:
+        zephyr_add_prj_conf("NEWLIB_LIBC", True)
+        zephyr_add_prj_conf("NEWLIB_LIBC_FLOAT_PRINTF", True)
+        zephyr_add_prj_conf(
+            "NEWLIB_LIBC_NANO",
+            conf.get(CONF_LIBC_NANO, "logger" not in CORE.loaded_integrations),
+        )
     # c++ support
     if framework_ver < cv.Version(2, 9, 2):
         zephyr_add_prj_conf("CPLUSPLUS", True)
@@ -1768,6 +1732,21 @@ def run_compile(args, config: ConfigType) -> bool:
         _copy_if_exists(west_out / "zephyr.signed.bin", zephyr_dir / "app_update.bin")
         _copy_if_exists(west_out / "zephyr.hex", zephyr_dir / "zephyr.hex")
         _copy_if_exists(build_dir / "merged.hex", zephyr_dir / "merged.hex")
+        if get_nrf52_variant() == VARIANT_NRF54L15:
+            # Devicetree sysbuild does not produce Partition Manager's merged HEX.
+            if not run_command_ok(
+                [
+                    str(paths["python_executable"]),
+                    str(paths["framework_path"] / "zephyr/scripts/build/mergehex.py"),
+                    "-o",
+                    str(zephyr_dir / "merged.hex"),
+                    str(build_dir / "mcuboot/zephyr/zephyr.hex"),
+                    str(west_out / "zephyr.signed.hex"),
+                ],
+                env=env,
+                stream_output=True,
+            ):
+                raise EsphomeError("Failed to merge nRF54L15 factory images")
 
     # For Adafruit bootloader builds, regenerate the UF2 from a hex file.
     # merged.hex carries the correct flash addresses; SDK 3.4.0+ no longer
