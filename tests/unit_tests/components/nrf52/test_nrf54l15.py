@@ -57,6 +57,7 @@ def nrf54(setup_core: Path) -> dict:
             "lfclk_source": "rc",
             "nfct_pins_as_gpios": True,
             "dk_peripherals": False,
+            "framework": {"advanced": {"enable_ota_rollback": False}},
         }
     )
     return config
@@ -209,7 +210,7 @@ def test_adc_uses_nrf54_reference_and_gain(nrf54: dict) -> None:
     with (
         patch.object(adc.cg, "new_Pvariable", return_value=MagicMock()),
         patch.object(adc.cg, "register_component", AsyncMock()),
-        patch.object(adc.cg, "gpio_pin_expression", AsyncMock(return_value=MagicMock())),
+        patch.object(adc.cg, "add_pin", AsyncMock()),
         patch.object(adc.cg, "add"),
         patch.object(adc.sensor, "register_sensor", AsyncMock()),
     ):
@@ -227,7 +228,7 @@ def test_spi_codegen_uses_distinct_nodes(nrf54: dict) -> None:
     with (
         patch.object(spi.cg, "new_Pvariable", return_value=MagicMock()),
         patch.object(spi.cg, "register_component", AsyncMock()),
-        patch.object(spi.cg, "gpio_pin_expression", AsyncMock(return_value=MagicMock())),
+        patch.object(spi.cg, "add_pin", AsyncMock()),
         patch.object(spi.cg, "add"),
         patch.object(spi.cg, "add_global"),
     ):

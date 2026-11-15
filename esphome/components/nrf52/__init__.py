@@ -95,6 +95,7 @@ from .framework import (
     get_build_env,
     get_build_paths,
     get_nrf52_variant,
+    include_west_project,
     set_nrf52_variant,
     setup_platformio_python_env,
     toolchain_tool,
@@ -594,9 +595,11 @@ def _mcuboot_to_code() -> None:
     sizes the two application slots first and hands settings_storage whatever
     remains -- a single 0x2000, the bare two sectors Zephyr NVS will accept.
     """
+    include_west_project("mcuboot")
     if get_nrf52_variant() == VARIANT_NRF54L15:
         _mcuboot_nrf54l15_to_code()
         return
+    include_west_project("zcbor")
     slot_size = (
         NRF52840_FLASH_SIZE - MCUBOOT_PARTITION_SIZE - SETTINGS_PARTITION_SIZE
     ) // 2
@@ -1441,13 +1444,7 @@ def _generate_cmake_lists(pch_on: bool) -> tuple[bool, list[Path]]:
     defines = [flag for flag in compile_flags if flag.startswith("-D")]
     options = [flag for flag in compile_flags if not flag.startswith("-D")]
 
-    # Honour `-I` build flags (cg.add_build_flag("-I<dir>")) on the app compile.
-    # get_project_compile_flags() intentionally forwards only -D/-W (it is shared
-    # with the ESP-IDF backend, which resolves extra includes through registered
-    # IDF components instead), so a bare include-dir build flag -- e.g. a component
-    # pointing at a prebuilt library's headers -- would otherwise be dropped here.
-    # The PlatformIO Zephyr path folded every build flag into CMAKE_CXX_FLAGS; add
-    # the include dirs to the app target so that behaviour carries over.
+    # External archives can supply their headers through -I build flags.
     include_dirs = sorted(
         flag[2:].strip().replace("\\", "/")
         for flag in CORE.build_flags
@@ -1476,7 +1473,7 @@ def _generate_cmake_lists(pch_on: bool) -> tuple[bool, list[Path]]:
         "target_sources(app PRIVATE ${APP_SOURCES})",
         "target_include_directories(app PRIVATE",
         '  "${CMAKE_CURRENT_LIST_DIR}/../src"',
-        *[f'  "{d}"' for d in include_dirs],
+        *[f"  {arg}" for arg in quote_cmake_args(include_dirs)],
         ")",
     ]
 

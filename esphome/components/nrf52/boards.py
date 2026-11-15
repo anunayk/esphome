@@ -41,8 +41,8 @@ BOARDS_ZEPHYR = {
             BOOTLOADER_MCUBOOT,
         ]
     },
-    # Nordic nRF52840 Dongle (PCA10059): factory Open DFU bootloader at 0xE0000, kept in place
-    "nrf52840dongle": {KEY_BOOTLOADER: [BOOTLOADER_NRF]},
+    # Keep the factory bootloader by default; replacing it with MCUboot requires SWD.
+    "nrf52840dongle": {KEY_BOOTLOADER: [BOOTLOADER_NRF, BOOTLOADER_MCUBOOT]},
 }
 
 # Boards with a GPIO wired to their RESET pin: driving it low is a pin reset, which the factory

@@ -27,14 +27,19 @@ def test_detect_bootloader_reports_a_missing_board() -> None:
 
 
 def test_dongle_defaults_to_nrf_bootloader() -> None:
-    """The dongle's only bootloader is the factory one, so it is selected without a config line."""
+    """The factory bootloader stays the default when MCUboot is not requested."""
     config = _detect_bootloader({"board": "nrf52840dongle"})
     assert config["bootloader"] == BOOTLOADER_NRF
 
 
 def test_dongle_rejects_foreign_bootloader() -> None:
     with pytest.raises(cv.Invalid, match="nrf52840dongle does not support"):
-        _detect_bootloader({"board": "nrf52840dongle", "bootloader": "mcuboot"})
+        _detect_bootloader({"board": "nrf52840dongle", "bootloader": "adafruit"})
+
+
+def test_dongle_accepts_mcuboot() -> None:
+    config = _detect_bootloader({"board": "nrf52840dongle", "bootloader": "mcuboot"})
+    assert config["bootloader"] == "mcuboot"
 
 
 def _dongle_core_data() -> None:

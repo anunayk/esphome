@@ -72,6 +72,21 @@ def test_scan_raises_when_no_device_found(monkeypatch) -> None:
 
 
 @pytest.mark.parametrize(
+    ("advertised_name", "matches"),
+    [("my-device-a1b2c3", True), ("my-device-other-a1b2c3", True), ("my-devices", False)],
+)
+def test_scan_matches_mac_suffix(
+    monkeypatch: pytest.MonkeyPatch, advertised_name: str, matches: bool
+) -> None:
+    _scan_result(monkeypatch, [(UUID, None, advertised_name)])
+    if matches:
+        assert asyncio.run(ota.smpmgr_scan("my-device")) == UUID
+    else:
+        with pytest.raises(EsphomeError, match="not found"):
+            asyncio.run(ota.smpmgr_scan("my-device"))
+
+
+@pytest.mark.parametrize(
     ("device", "udp", "transport"),
     [
         ("/dev/ttyACM0", False, "serial"),
@@ -514,22 +529,61 @@ def _slot(hash_: bytes, active: bool, pending: bool) -> SimpleNamespace:
 
 
 @pytest.mark.parametrize("udp", [True, False])
-def test_upload_refuses_a_stale_pending_image(smp_ok: None, udp: bool) -> None:
-    """An earlier update MCUboot never swapped in blocks the slot on every transport."""
+def test_upload_reports_a_stale_pending_image_that_cannot_be_erased(
+    monkeypatch: pytest.MonkeyPatch, smp_ok: None, udp: bool
+) -> None:
+    """Old firmware that disallows pending erasure still reports a recovery path."""
     client = _state_client(
         _slot(b"running", active=True, pending=False),
         _slot(b"earlier", active=False, pending=True),
     )
-    with pytest.raises(
-        EsphomeError,
-        match="earlier update pending. Restart the device to apply it.*over USB",
-    ):
+    denied = SimpleNamespace(err=SimpleNamespace(rc=ota.IMG_MGMT_ERR.NO_FREE_SLOT))
+    client.request.side_effect = [client.request.return_value, denied]
+    monkeypatch.setattr(ota, "error", lambda response: response is denied)
+    with pytest.raises(EsphomeError, match="pending image.*Recover by resetting"):
         asyncio.run(
-            ota._smpmgr_upload_connected(  # pylint: disable=protected-access
+            ota._smpmgr_upload_connected(
                 client, "fd00::5", Path("firmware.bin"), b"new", udp
             )
         )
-    assert client.request.await_count == 1
+    assert client.request.await_count == 2
+    assert isinstance(client.request.await_args.args[0], ota.ImageErase)
+
+
+@pytest.mark.parametrize("udp", [True, False])
+def test_upload_erases_a_stale_pending_image(
+    monkeypatch: pytest.MonkeyPatch, smp_ok: None, udp: bool, tmp_path: Path
+) -> None:
+    """A pending image is erased before its replacement is uploaded."""
+    monkeypatch.setattr(ota, "RESET_DELAY", 0)
+    firmware = tmp_path / "firmware.bin"
+    firmware.write_bytes(b"new firmware")
+    client = _state_client(
+        _slot(b"running", active=True, pending=False),
+        _slot(b"earlier", active=False, pending=True),
+    )
+    uploaded = []
+
+    async def upload(image: bytes):
+        uploaded.append(image)
+        yield len(image)
+
+    client.upload = upload
+    udp_upload = AsyncMock()
+    monkeypatch.setattr(ota_udp, "_udp_upload", udp_upload)
+    monkeypatch.setattr(ota_udp, "_udp_reset", AsyncMock())
+    asyncio.run(
+        ota._smpmgr_upload_connected(
+            client, "fd00::5", firmware, b"new", udp
+        )
+    )
+    assert isinstance(client.request.await_args_list[1].args[0], ota.ImageErase)
+    assert client.request.await_args_list[1].args[1] == ota.ERASE_TIMEOUT
+    if udp:
+        assert udp_upload.await_args.args[1] == b"new firmware"
+    else:
+        assert uploaded == [b"new firmware"]
+    assert isinstance(client.request.await_args_list[2].args[0], ota.ImageStatesWrite)
 
 
 def test_upload_keeps_the_same_pending_image(

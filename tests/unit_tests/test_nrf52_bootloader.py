@@ -5,6 +5,7 @@ import pytest
 from esphome.components import nrf52
 from esphome.components.nrf52 import boards
 from esphome.components.nrf52.const import BOOTLOADER_ADAFRUIT
+from esphome.components.nrf52.framework import wanted_west_projects
 from esphome.components.zephyr import zephyr_data, zephyr_set_core_data
 from esphome.components.zephyr.const import (
     BOOTLOADER_MCUBOOT,
@@ -17,7 +18,8 @@ from esphome.components.zephyr.const import (
     KEY_SYSBUILD_CONF,
 )
 import esphome.config_validation as cv
-from esphome.const import CONF_BOARD
+from esphome.const import CONF_BOARD, KEY_CORE, KEY_FRAMEWORK_VERSION
+from esphome.core import CORE
 
 
 def test_xiao_ble_accepts_mcuboot_bootloader() -> None:
@@ -57,6 +59,7 @@ def test_xiao_ble_default_bootloader_is_not_mcuboot() -> None:
 @pytest.fixture(params=["xiao_ble", "adafruit_itsybitsy_nrf52840", "some_other_board"])
 def xiao_ble_mcuboot(request: pytest.FixtureRequest) -> None:
     """The MCUboot setup is board-agnostic, so assert it on more than one."""
+    CORE.data[KEY_CORE] = {KEY_FRAMEWORK_VERSION: cv.Version(2, 9, 2)}
     zephyr_set_core_data(
         {CONF_BOARD: request.param, KEY_BOOTLOADER: BOOTLOADER_MCUBOOT}
     )
@@ -86,6 +89,7 @@ def test_mcuboot_image_is_built(xiao_ble_mcuboot: None) -> None:
     # No Adafruit bootloader is left to consume a UF2, and the one that would be
     # emitted carries the wrong load address.
     assert app_conf["CONFIG_BUILD_OUTPUT_UF2"][0] is False
+    assert {"mcuboot", "zcbor"} <= wanted_west_projects()
 
 
 def test_upgrade_mode_and_signing_are_set_at_sysbuild_level(
