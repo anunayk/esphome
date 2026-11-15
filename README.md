@@ -35,6 +35,7 @@ SHA-256 declares its crypto SDK modules, including builds without Bluetooth.
 Other components can request extra SDK modules with
 `esphome.components.nrf52.framework.include_west_project()` from `to_code()`.
 The native build merges external `ZEPHYR_EXTRA_MODULES` with library modules.
+MCUboot declares its bootloader module and its nRF52840 serial-recovery CBOR module.
 The module profile disables the DK LEDs, buttons, PWM, external flash, and UART20.
 Bus components supply their own pin assignments.
 LFRC uses the internal low-frequency oscillator in both the application and MCUboot.

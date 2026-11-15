@@ -92,3 +92,31 @@ def test_build_flags_are_split_and_quoted(tmp_path: Path) -> None:
         '  "-Wl,--start-group,-lfoo,--end-group"\n'
         ")"
     ) in text
+
+
+def test_external_archive_headers_and_modules_are_kept(tmp_path: Path) -> None:
+    """A firmware archive and generated header-only library both reach sysbuild."""
+    CORE.config_path = tmp_path / "test.yaml"
+    CORE.build_path = tmp_path / "build"
+    CORE.name = "livingroom"
+    include_dir = tmp_path / "headers with $dollar"
+    CORE.build_flags = {f"-I{include_dir}"}
+    module = tmp_path / "arduinojson"
+    with patch(
+        "esphome.components.zephyr.library.generate_zephyr_modules",
+        return_value=[module],
+    ):
+        changed, modules = nrf52._generate_cmake_lists(False)
+    assert changed
+    text = (tmp_path / "build" / "zephyr" / "CMakeLists.txt").read_text()
+    assert str(include_dir).replace("$", "\\$") in text
+    assert "set(EXTRA_ZEPHYR_MODULES" not in text
+    env = {
+        "ZEPHYR_EXTRA_MODULES": "/external/archive;/shared",
+        "EXTRA_ZEPHYR_MODULES": "/shared;/another",
+    }
+    nrf52._merge_zephyr_extra_modules(env, modules)
+    assert env["EXTRA_ZEPHYR_MODULES"] == (
+        f"/shared;/another;/external/archive;{module}"
+    )
+    assert env["ZEPHYR_EXTRA_MODULES"] == env["EXTRA_ZEPHYR_MODULES"]
